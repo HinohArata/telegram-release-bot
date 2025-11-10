@@ -22,7 +22,18 @@ DONATE_URL = "https://t.me/donate_zero/6"
 AFL_SUPPORT = "https://t.me/AfterLifeOS"
 SOURCE_CHANGELOGS_URL = "https://github.com/AfterlifeOS/Release_changelogs/blob/main/AfterLife-Changelogs.mk"
 allowed_ids_str = os.environ.get("ALLOWED_CHAT_IDS", "")
-ALLOWED_CHAT_IDS = [int(x.strip()) for x in allowed_ids_str.split(",") if x.strip().isdigit()]
+temp_ids_list = allowed_ids_str.split(",")
+ALLOWED_CHAT_IDS = []
+
+for item in temp_ids_list:
+    item_stripped = item.strip()
+    if item_stripped:
+        try:
+            ALLOWED_CHAT_IDS.append(int(item_stripped))
+        except ValueError:
+            print(f"[WARNING] Ignoring invalid ID in ALLOWED_CHAT_IDS: {item_stripped}")
+
+print(f"Successfully loaded {len(ALLOWED_CHAT_IDS)} Chat IDs: {ALLOWED_CHAT_IDS}")
 
 # === HELPERS ===
 def format_date(timestamp):
