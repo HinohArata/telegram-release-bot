@@ -12,23 +12,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
 
-# --- keep-alive web server (aiohttp) ---
-from aiohttp import web
-
-async def _health(request):
-    return web.Response(text="ok")
-
-async def _run_keepalive_server():
-    app = web.Application()
-    app.router.add_get("/", _health)
-    port = int(os.environ.get("PORT", 8080))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"Keep-alive server started on port {port}")
-    return runner
-
 # === CONFIGURATION ===
 load_dotenv(dotenv_path='private.env')
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -261,9 +244,6 @@ async def main():
         return
 
     os.makedirs(os.path.dirname(BANNER_FILE_PATH), exist_ok=True)
-
-    # Start keep-alive server
-    await _run_keepalive_server()
 
     # Build and start bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()

@@ -1,4 +1,3 @@
-aiohttp
 python-dotenv
 python-telegram-bot
 requests
