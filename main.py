@@ -227,9 +227,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         original_caption = query.message.caption_html
         notes_list_final = []
-        if "📝 <b>Notes:</b>" in original_caption:
+        if "<b>Notes:</b>" in original_caption:
             try:
-                notes_section = original_caption.split("📝 <b>Notes:</b>\n")[1].split("\n\n")[0]
+                notes_section = original_caption.split("<b>Notes:</b>\n")[1].split("\n\n")[0]
                 notes_list_final = notes_section.split("\n")
             except IndexError:
                 pass
