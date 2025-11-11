@@ -77,8 +77,6 @@ def format_post(data, posted_by_username, notes_list=None):
     maintainer_name = data.get("maintainer_name", posted_by_username)
     maintainer_link = data.get("maintainer_link", f"https://t.me/{posted_by_username}")
     build_date = format_date(int(data['build_date'])) if data.get("build_date") else "Unknown"
-    mt_support = data.get("support_group") or AFL_SUPPORT
-    cl = f"{BASE_URL}/{data['device_codename']}/changelog.txt"
     size = bytes_to_gb(data.get("size"))
     release_type = data.get("build_type", "unofficial").capitalize()
     device_codename = data['device_codename']
@@ -89,13 +87,12 @@ def format_post(data, posted_by_username, notes_list=None):
         f"<b>{rom_name} v{version} | {release_type} | Android 16</b>\n"
         f"Supported Device: {device_name} - {device_codename}\n"
         f"Build date: {build_date}\n"
-        f"Maintainer: <a href='{maintainer_link}'>{maintainer_name}</a>\n\n"
-        f"<a href='{mt_support}'>Device support</a>\n"
+        f"Maintainer: <a href='{maintainer_link}'>{maintainer_name}</a>\n"
     )
 
     if notes_list:
         notes_section = "\n".join(notes_list)
-        post += f"\n📝 <b>Notes:</b>\n{notes_section}\n"
+        post += f"\n<b>Notes:</b>\n{notes_section}\n"
 
     post += (
         f"\nThere's nothing special about my rom, you can skip if you don't like, or you can taste it.\n"
@@ -109,6 +106,7 @@ def format_post(data, posted_by_username, notes_list=None):
 
 def build_keyboard(data):
     codename = data['device_codename']
+    mt_support = data.get("support_group") or AFL_SUPPORT
     buttons = [
         [
             InlineKeyboardButton("Download", url=f"https://afterlifeos.com/device/{codename}/"),
@@ -117,6 +115,9 @@ def build_keyboard(data):
         [
             InlineKeyboardButton("Support Group", url=AFL_SUPPORT),
             InlineKeyboardButton("Donate", url=DONATE_URL),
+        ],
+        [
+            InlineKeyboardButton("Device Support", url=mt_support)
         ],
     ]
     return InlineKeyboardMarkup(buttons)
