@@ -2,3 +2,4 @@ python-dotenv
 python-telegram-bot
 requests
 telegram
+redis
