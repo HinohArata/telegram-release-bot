@@ -80,15 +80,17 @@ def format_post(data, posted_by_username, notes_list=None):
     mt_support = data.get("support_group") or AFL_SUPPORT
     cl = f"{BASE_URL}/{data['device_codename']}/changelog.txt"
     size = bytes_to_gb(data.get("size"))
+    release_type = data.get("build_type", "unofficial").capitalize()
+    device_codename = data['device_codename']
     device_codename_tag = f"#{data['device_codename']}"
     release_codename_tag = f"#{data['release_codename']}" if data.get("release_codename") else ""
 
     post = (
-        f"📢 <b>Released {rom_name} v{version} for {device_name}</b>\n"
-        f"🔹 <b>Maintainer:</b> <a href='{maintainer_link}'>{maintainer_name}</a>\n"
-        f"🔹 <b>Build date:</b> {build_date}\n\n"
-        f"💬 <b><a href='{mt_support}'>Device support</a></b>\n"
-        f"📋 <b><a href='{cl}'>Device changelog</a></b>\n"
+        f"<b>{rom_name} v{version} | {release_type} | Android 16</b>\n"
+        f"Supported Device: {device_name} - {device_codename}\n"
+        f"Build date: {build_date}\n"
+        f"Maintainer: <a href='{maintainer_link}'>{maintainer_name}</a>\n\n"
+        f"<a href='{mt_support}'>Device support</a>\n"
     )
 
     if notes_list:
@@ -109,12 +111,12 @@ def build_keyboard(data):
     codename = data['device_codename']
     buttons = [
         [
-            InlineKeyboardButton("⬇️ Download", url=f"https://afterlifeos.com/device/{codename}/"),
-            InlineKeyboardButton("🧾 Source Changelogs", url=SOURCE_CHANGELOGS_URL),
+            InlineKeyboardButton("Download", url=f"https://afterlifeos.com/device/{codename}/"),
+            InlineKeyboardButton("Source Changelogs", url=SOURCE_CHANGELOGS_URL),
         ],
         [
-            InlineKeyboardButton("💬 Support Group", url=AFL_SUPPORT),
-            InlineKeyboardButton("❤️ Donate", url=DONATE_URL),
+            InlineKeyboardButton("Support Group", url=AFL_SUPPORT),
+            InlineKeyboardButton("Donate", url=DONATE_URL),
         ],
     ]
     return InlineKeyboardMarkup(buttons)
