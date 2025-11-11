@@ -2,12 +2,14 @@ import os
 import requests
 import asyncio
 from datetime import datetime
+import re  # NEW: Import module Regular Expressions
 
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, ForceReply
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes,
+    MessageHandler, filters
 )
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
@@ -15,7 +17,7 @@ from dotenv import load_dotenv
 # === CONFIGURATION ===
 load_dotenv(dotenv_path='private.env')
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = '@Afterlife_update'
+CHANNEL_ID = '@forbotpost_test'
 BANNER_FILE_PATH = "banner/banner.jpg"
 BASE_URL = "https://raw.githubusercontent.com/AfterlifeOS/device_afterlife_ota/refs/heads/16"
 DONATE_URL = "https://t.me/donate_zero/6"
@@ -91,8 +93,10 @@ def format_post(data, posted_by_username, notes_list=None):
     )
 
     if notes_list:
-        notes_section = "\n".join(notes_list)
-        post += f"\n<b>Notes:</b>\n{notes_section}\n"
+        # MODIFIED: Ensure notes format starts with "- "
+        notes_section = "\n".join([f"- {note.lstrip('- ')}" for note in notes_list if note.strip()])
+        if notes_section:
+            post += f"\n<b>Notes:</b>\n{notes_section}\n"
 
     post += (
         f"\nThere's nothing special about my rom, you can skip if you don't like, or you can taste it.\n"
@@ -128,6 +132,13 @@ def confirm_keyboard(device_codename, poster_username, user_id):
         [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_post:{user_id}")]
     ])
 
+# NEW: Keyboard to ask for notes
+def ask_notes_keyboard(device_codename, poster_username, user_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Yes, add notes", callback_data=f"notes_yes:{device_codename}:{poster_username}:{user_id}")],
+        [InlineKeyboardButton("No, continue", callback_data=f"notes_no:{device_codename}:{poster_username}:{user_id}")]
+    ])
+
 # === COMMANDS ===
 async def view_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -147,6 +158,7 @@ async def view_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("Banner not found. Please upload file banner/banner.jpg.")
 
+# MODIFIED: post_command updated to ask for notes
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in ALLOWED_CHAT_IDS:
@@ -163,15 +175,12 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "Usage:\n/post <codename>\nExample: /post surya\n\n"
-            "Or:\n/post <codename> notes1; notes2\nExample: /post surya Clean flash is mandatory; Use latest firmware"
+            "Usage:\n/post <codename>\nExample: /post surya"
         )
         return
 
     device_codename = context.args[0].lower()
-    notes_raw = " ".join(context.args[1:]) if len(context.args) > 1 else None
-    notes_list = [f"- {line.strip()}" for line in notes_raw.split(";") if line.strip()] if notes_raw else None
-
+    
     data = fetch_rom_data(device_codename)
     if not data:
         await update.message.reply_text(
@@ -180,10 +189,9 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    data["notes_list"] = notes_list
     poster_username = data.get("maintainer_name", update.effective_user.username or update.effective_user.first_name)
-    post_preview = format_post(data, poster_username, notes_list)
-    keyboard = confirm_keyboard(device_codename, poster_username, update.effective_user.id)
+    post_preview = format_post(data, poster_username, notes_list=None) 
+    keyboard = ask_notes_keyboard(device_codename, poster_username, update.effective_user.id)
 
     try:
         with open(BANNER_FILE_PATH, "rb") as banner_photo:
@@ -196,10 +204,129 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Failed to send preview: {e}")
 
+# NEW: Handler for when the user replies with notes
+async def handle_notes_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if 'awaiting_notes_for' not in context.user_data:
+        return 
+            
+    state = context.user_data['awaiting_notes_for']
+    
+    if (update.message.reply_to_message and 
+        update.message.reply_to_message.message_id == state['prompt_message_id'] and
+        user_id == state['user_id']):
+        
+        # Process the notes
+        notes_raw = update.message.text
+        
+        # --- MODIFICATION START ---
+        # NEW: Convert Markdown-style links [text](url) to HTML <a href="url">text</a>
+        notes_with_html_links = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2">\1</a>', notes_raw)
+        
+        # MODIFIED: Use the converted string (notes_with_html_links) instead of notes_raw
+        notes_list = [f"- {line.strip()}" for line in notes_with_html_links.split("\n") if line.strip()]
+        # --- MODIFICATION END ---
+
+        # Get data from state
+        device_codename = state['device_codename']
+        poster_username = state['poster_username']
+        original_preview_message_id = state['original_preview_message_id']
+
+        data = fetch_rom_data(device_codename)
+        if not data:
+            await update.message.reply_text("Error: Failed to re-fetch device data. Please try the /post command again.")
+            del context.user_data['awaiting_notes_for']
+            return
+
+        # Format new caption *with* notes
+        post_with_notes = format_post(data, poster_username, notes_list)
+        
+        # Get final confirmation keyboard
+        keyboard = confirm_keyboard(device_codename, poster_username, user_id)
+
+        try:
+            # Edit the original preview message to include notes and final keyboard
+            await context.bot.edit_message_caption(
+                chat_id=update.effective_chat.id,
+                message_id=original_preview_message_id,
+                caption=post_with_notes,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard
+            )
+            
+            # Clean up: delete the bot's prompt and the user's reply
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=state['prompt_message_id'])
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+        
+        except Exception as e:
+            await update.message.reply_text(f"An error occurred while updating the post: {e}")
+        
+        finally:
+            # Always clear state
+            del context.user_data['awaiting_notes_for']
+
+# MODIFIED: callback_handler to include new "notes_yes" and "notes_no" logic
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
 
+    # NEW: Handle "Yes, add notes"
+    if query.data.startswith("notes_yes:"):
+        try:
+            _, device_codename, poster_username, expected_user_id = query.data.split(":", 3)
+        except ValueError:
+            await query.edit_message_text("Error: Invalid callback data format.")
+            return
+            
+        if str(user_id) != expected_user_id:
+            await query.answer("You are not allowed to perform this action.", show_alert=True)
+            return
+
+        await query.answer()
+        await query.edit_message_reply_markup(None) # Remove Yes/No buttons
+        
+        # Send a new message asking for a reply
+        # ==================================================================
+        # MODIFICATION IS HERE: Added \ before the two . characters
+        # ==================================================================
+        prompt_msg = await query.message.reply_text(
+            "Please reply to this message with your notes\\.\n"
+            "Separate each note with a new line\\.\n\n"
+            "To add a link, use format: `[text](url)`",
+            reply_markup=ForceReply(selective=True),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Store state in user_data
+        context.user_data['awaiting_notes_for'] = {
+            'original_preview_message_id': query.message.message_id,
+            'prompt_message_id': prompt_msg.message_id,
+            'device_codename': device_codename,
+            'poster_username': poster_username,
+            'user_id': user_id
+        }
+        return
+
+    # NEW: Handle "No, continue"
+    if query.data.startswith("notes_no:"):
+        try:
+            _, device_codename, poster_username, expected_user_id = query.data.split(":", 3)
+        except ValueError:
+            await query.edit_message_text("Error: Invalid callback data format.")
+            return
+
+        if str(user_id) != expected_user_id:
+            await query.answer("You are not allowed to perform this action.", show_alert=True)
+            return
+
+        await query.answer()
+        # Just show the final confirm keyboard
+        keyboard = confirm_keyboard(device_codename, poster_username, user_id)
+        await query.edit_message_reply_markup(keyboard)
+        return
+
+    # --- Existing handlers ---
     if query.data.startswith("cancel_post:"):
         _, expected_user_id = query.data.split(":")
         if str(user_id) != expected_user_id:
@@ -207,6 +334,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_reply_markup(None)
         await query.message.reply_text("❌ Post canceled.")
+        # NEW: Clear state if user cancels
+        if 'awaiting_notes_for' in context.user_data:
+            del context.user_data['awaiting_notes_for']
         return
 
     if query.data.startswith("confirm_send:"):
@@ -225,12 +355,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Failed to re-fetch JSON data.")
             return
 
+        # MODIFIED: This logic now correctly fetches notes from the *edited* caption
         original_caption = query.message.caption_html
         notes_list_final = []
         if "<b>Notes:</b>" in original_caption:
             try:
                 notes_section = original_caption.split("<b>Notes:</b>\n")[1].split("\n\n")[0]
-                notes_list_final = notes_section.split("\n")
+                # Split by newline and remove the "- " prefix for the format_post function
+                notes_list_final = [line.lstrip('- ') for line in notes_section.split("\n") if line.strip()]
             except IndexError:
                 pass
 
@@ -248,7 +380,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=kb
                 )
             await query.edit_message_reply_markup(None)
-            await query.message.reply_text("✅ Post sent to channel successfully.")
+            await query.message.reply_text(f"✅ Post sent to {CHANNEL_ID} successfully.")
         except Exception as e:
             await query.message.reply_text(f"Failed to send to channel: {e}")
 
@@ -261,9 +393,16 @@ async def main():
 
     # Build and start bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("banner", view_banner_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    
+    # NEW: Add the message handler for replies
+    # It uses filters.REPLY to only trigger on replies,
+    # filters.TEXT for text messages, and ~filters.COMMAND to ignore commands.
+    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_notes_reply))
+
 
     print("Bot is running...")
     await app.initialize()
