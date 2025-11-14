@@ -125,10 +125,11 @@ def format_post(data, posted_by_username, notes_list=None):
     release_type = data.get("build_type", "unofficial").capitalize()
     device_codename = data['device_codename']
     device_codename_tag = f"#{data['device_codename']}"
+    release_codename = data['release_codename'].capitalize() if data.get("release_codename") else ""
     release_codename_tag = f"#{data['release_codename']}" if data.get("release_codename") else ""
 
     post = (
-        f"<b>{rom_name} v{version} | {release_type} | Android 16</b>\n"
+        f"<b>{rom_name} v{version} {release_codename} | {release_type} | Android 16</b>\n"
         f"Supported Device: {device_name} - {device_codename}\n"
         f"Build date: {build_date}\n"
         f"Maintainer: <a href='{maintainer_link}'>{maintainer_name}</a>\n"
