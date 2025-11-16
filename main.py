@@ -290,7 +290,7 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    device_codename = context.args[0].lower()
+    device_codename = context.args[0]
     
     data = fetch_rom_data(device_codename)
     if not data:
