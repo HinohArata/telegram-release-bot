@@ -24,7 +24,7 @@ REDIS_URL = os.environ.get("REDIS_URL")
 BASE_URL = "https://raw.githubusercontent.com/AfterlifeOS/device_afterlife_ota/refs/heads/16"
 DONATE_URL = "https://t.me/donate_zero/6"
 AFL_SUPPORT = "https://t.me/AfterLifeOS"
-SOURCE_CHANGELOGS_URL = "https://github.com/AfterlifeOS/Release_changelogs/blob/main/AfterLife-Changelogs.mk"
+SOURCE_CHANGELOGS_URL = "https://afterlifeos.com/changelog/"
 
 # Allowed Chat
 allowed_ids_str = os.environ.get("ALLOWED_CHAT_IDS", "")
