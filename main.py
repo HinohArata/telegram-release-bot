@@ -21,6 +21,7 @@ load_dotenv(dotenv_path='private.env')
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 REDIS_URL = os.environ.get("REDIS_URL")
+STICKER_ID = os.environ.get("STICKER_ID")
 BASE_URL = "https://raw.githubusercontent.com/AfterlifeOS/device_afterlife_ota/refs/heads/16"
 DONATE_URL = "https://t.me/donate_zero/6"
 AFL_SUPPORT = "https://t.me/AfterLifeOS"
@@ -420,7 +421,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle "Cancel"
     if query.data.startswith("cancel_post:"):
-        _, expected_user_id = query.data.split(":")
+        try:
+            _, expected_user_id = query.data.split(":")
+        except ValueError:
+             # Fallback if split fails
+             expected_user_id = query.data.split(":")[-1]
+
         if str(user_id) != expected_user_id:
             await query.answer("You are not allowed to cancel this post.", show_alert=True)
             return
@@ -441,10 +447,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(user_id) != expected_user_id:
             await query.answer("You are not allowed to send this post.", show_alert=True)
             return
-            
+
         # Use the helper to run the sync command
         banner_file_id = await run_redis_command(redis_client, "get", "banner_file_id")
-        
+
         if not banner_file_id:
             await query.message.reply_text(
                 "Failed to send: `BANNER_FILE_ID` is not set. Please /setbanner.",
@@ -470,6 +476,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = build_keyboard(data)
         bot = Bot(token=BOT_TOKEN)
 
+        await query.edit_message_reply_markup(None)
+        
+        # 2. Send Sticker (if STICKER_ID is configured)
+        if STICKER_ID:
+            try:
+                await bot.send_sticker(chat_id=CHANNEL_ID, sticker=STICKER_ID)
+                await query.message.reply_text(
+                    "⏳ **Sticker sent to channel.**\nWaiting 30 seconds before sending the post...", 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed to send sticker: {e}")
+                await query.message.reply_text(
+                    f"⚠️ Failed to send sticker: {e}. Proceeding with the post...", 
+                    parse_mode=ParseMode.HTML
+                )
+        else:
+            await query.message.reply_text(
+                "⚠️ `STICKER_ID` is not set. Waiting 30 seconds...", 
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+        # 3. Delay for 30 seconds
+        await asyncio.sleep(30)
+
+        # 4. Send the main post
         try:
             await bot.send_photo(
                 chat_id=CHANNEL_ID,
@@ -488,7 +520,7 @@ async def main():
     if not BOT_TOKEN:
         print("[ERROR] BOT_TOKEN not found. Set it in Secrets or private.env")
         return
-        
+
     if not REDIS_URL:
         print("[ERROR] REDIS_URL not found. Set it in Secrets or private.env")
         return
