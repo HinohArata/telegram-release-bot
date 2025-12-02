@@ -27,6 +27,11 @@ DONATE_URL = "https://t.me/donate_zero/6"
 AFL_SUPPORT = "https://t.me/AfterLifeOS"
 SOURCE_CHANGELOGS_URL = "https://afterlifeos.com/changelog/"
 
+# === Testing Env ===
+TEST_GROUP_ID = int(os.environ.get("TEST_GROUP_ID", "0"))
+TEST_CHANNEL_ID = os.environ.get("TEST_CHANNEL_ID")
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+
 # Allowed Chat
 allowed_ids_str = os.environ.get("ALLOWED_CHAT_IDS", "")
 temp_ids_list = allowed_ids_str.split(",")
@@ -39,6 +44,10 @@ for item in temp_ids_list:
             ALLOWED_CHAT_IDS.append(int(item_stripped))
         except ValueError:
             print(f"[WARNING] Ignoring invalid ID in ALLOWED_CHAT_IDS: {item_stripped}")
+
+if TEST_GROUP_ID != 0 and TEST_GROUP_ID not in ALLOWED_CHAT_IDS:
+    ALLOWED_CHAT_IDS.append(TEST_GROUP_ID)
+    print(f"Added TEST_GROUP_ID {TEST_GROUP_ID} to allowed list.")
 
 print(f"Successfully loaded {len(ALLOWED_CHAT_IDS)} Chat IDs: {ALLOWED_CHAT_IDS}")
 
@@ -269,9 +278,20 @@ async def view_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # post_command
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id # Capture user ID
+    
     if chat_id not in ALLOWED_CHAT_IDS:
         await update.message.reply_text("Sorry, this command is only allowed in specific groups.")
         return
+
+    if chat_id == TEST_GROUP_ID:
+        if user_id != OWNER_ID:
+            await update.message.reply_text("⛔ In this test group, only the Owner is allowed to post.")
+            return
+    else:
+        if user_id not in ADMIN_USER_IDS:
+            await update.message.reply_text("Sorry, you are not authorized to use this command.")
+            return
 
     redis_client: redis.Redis = context.bot_data["redis"]
     # Use the helper to run the sync command
@@ -315,7 +335,7 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Failed to send preview: {e}")
 
-# ... (handle_notes_reply remains exactly the same) ...
+# ... (handle_notes_reply) ...
 async def handle_notes_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -448,6 +468,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("You are not allowed to send this post.", show_alert=True)
             return
 
+        current_chat_id = query.message.chat.id
+        target_chat_id = CHANNEL_ID
+        if current_chat_id == TEST_GROUP_ID:
+            if not TEST_CHANNEL_ID:
+                await query.message.reply_text("⚠️ Error: TEST_CHANNEL_ID is not set in env!")
+                return
+            target_chat_id = TEST_CHANNEL_ID
+
         # Use the helper to run the sync command
         banner_file_id = await run_redis_command(redis_client, "get", "banner_file_id")
 
@@ -481,10 +509,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2. Send Sticker (if STICKER_ID is configured)
         if STICKER_ID:
             try:
-                await bot.send_sticker(chat_id=CHANNEL_ID, sticker=STICKER_ID)
+                await bot.send_sticker(chat_id=target_chat_id, sticker=STICKER_ID)
+                
                 await query.message.reply_text(
-                    "⏳ **Sticker sent to channel.**\nWaiting 30 seconds before sending the post...", 
-                    parse_mode=ParseMode.MARKDOWN
+                    f"⏳ <b>Sticker sent to {target_chat_id}.</b>\nWaiting 30 seconds...", 
+                    parse_mode=ParseMode.HTML
                 )
             except Exception as e:
                 print(f"[ERROR] Failed to send sticker: {e}")
@@ -504,13 +533,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 4. Send the main post
         try:
             await bot.send_photo(
-                chat_id=CHANNEL_ID,
+                chat_id=target_chat_id,
                 photo=banner_file_id, 
                 caption=msg,
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb
             )
-            await query.message.reply_text(f"✅ Post sent to {CHANNEL_ID} successfully.")
+            await query.message.reply_text(f"✅ Post sent to {target_chat_id} successfully.")
         except Exception as e:
             print(f"[ERROR] Sending photo failed: {e}")
             await query.message.reply_text(f"Failed to send to channel: {e}")
