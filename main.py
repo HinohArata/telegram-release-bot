@@ -510,9 +510,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb
             )
-            await query.edit_message_reply_markup(None)
             await query.message.reply_text(f"✅ Post sent to {CHANNEL_ID} successfully.")
         except Exception as e:
+            print(f"[ERROR] Sending photo failed: {e}")
             await query.message.reply_text(f"Failed to send to channel: {e}")
 
 # main() function
