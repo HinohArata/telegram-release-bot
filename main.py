@@ -1,6 +1,7 @@
 import os
 import requests
 import asyncio
+import html
 from datetime import datetime
 import re
 import redis
@@ -347,9 +348,15 @@ async def handle_notes_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if (update.message.reply_to_message and 
         update.message.reply_to_message.message_id == state['prompt_message_id'] and
         user_id == state['user_id']):
-        
+
         notes_raw = update.message.text
-        notes_with_html_links = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2">\1</a>', notes_raw)
+        notes_safe = html.escape(notes_raw)
+        notes_with_html_links = re.sub(
+            r'\[(.*?)]\s*\(\s*(.*?)\s*\)', 
+            r'<a href="\2">\1</a>', 
+            notes_safe
+        )
+
         notes_list = [f"- {line.strip()}" for line in notes_with_html_links.split("\n") if line.strip()]
 
         device_codename = state['device_codename']
@@ -378,6 +385,7 @@ async def handle_notes_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
         
         except Exception as e:
+            print(f"[ERROR] Edit caption failed: {e}")
             await update.message.reply_text(f"An error occurred while updating the post: {e}")
         
         finally:
@@ -408,11 +416,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt_msg = await query.message.reply_text(
             "Please reply to this message with your notes\\.\n"
             "Separate each note with a new line\\.\n\n"
-            "To add a link, use format: `[text](url)`",
+            "To add a link, use format: `[text]<Space>(url)`\\.\n\n"
+            "Example:\n"
+            "Initial Build\n"
+            "Use this \\[Recovery\\] \\(https://t\\.me/HinohArata\\)",
             reply_markup=ForceReply(selective=True),
             parse_mode=ParseMode.MARKDOWN_V2
         )
-        
+
         context.user_data['awaiting_notes_for'] = {
             'original_preview_message_id': query.message.message_id,
             'prompt_message_id': prompt_msg.message_id,
