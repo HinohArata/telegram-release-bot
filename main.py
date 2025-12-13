@@ -102,6 +102,12 @@ def fetch_rom_data(device_codename):
             json_data = res.json()
             if "response" in json_data and json_data["response"]:
                 j = json_data["response"][0]
+                
+                # FIX: Ensure telegram link has https://
+                maintainer_link = j.get("telegram", "")
+                if maintainer_link and not maintainer_link.startswith("http"):
+                    maintainer_link = f"https://{maintainer_link}"
+                
                 return {
                     "device_codename": device_codename,
                     "device_name": j.get("device"),
@@ -113,7 +119,7 @@ def fetch_rom_data(device_codename):
                     "size": j.get("size"),
                     "build_type": j.get("buildtype"),
                     "maintainer_name": j.get("maintainer"),
-                    "maintainer_link": j.get("telegram"),
+                    "maintainer_link": maintainer_link, 
                     "support_group": j.get("forum"),
                 }
     except Exception as e:
@@ -179,16 +185,18 @@ def build_keyboard(data):
     ]
     return InlineKeyboardMarkup(buttons)
 
-def confirm_keyboard(device_codename, poster_username, user_id):
+# FIXED: Removed poster_username from callback data to save bytes
+def confirm_keyboard(device_codename, user_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Post to Channel", callback_data=f"confirm_send:{device_codename}:{poster_username}:{user_id}")],
+        [InlineKeyboardButton("✅ Post to Channel", callback_data=f"confirm_send:{device_codename}:{user_id}")],
         [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_post:{user_id}")]
     ])
 
-def ask_notes_keyboard(device_codename, poster_username, user_id):
+# FIXED: Removed poster_username from callback data to save bytes
+def ask_notes_keyboard(device_codename, user_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Yes, add notes", callback_data=f"notes_yes:{device_codename}:{poster_username}:{user_id}")],
-        [InlineKeyboardButton("No, continue", callback_data=f"notes_no:{device_codename}:{poster_username}:{user_id}")]
+        [InlineKeyboardButton("Yes, add notes", callback_data=f"notes_yes:{device_codename}:{user_id}")],
+        [InlineKeyboardButton("No, continue", callback_data=f"notes_no:{device_codename}:{user_id}")]
     ])
 
 # === COMMANDS ===
@@ -216,7 +224,6 @@ async def set_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         redis_client: redis.Redis = context.bot_data["redis"]
-        # Use the helper to run the sync command
         await run_redis_command(redis_client, "set", "banner_file_id", file_id)
         
         await update.message.reply_text(
@@ -242,7 +249,6 @@ async def remove_banner_command(update: Update, context: ContextTypes.DEFAULT_TY
         
     try:
         redis_client: redis.Redis = context.bot_data["redis"]
-        # Use the helper to run the sync command
         await run_redis_command(redis_client, "delete", "banner_file_id")
         
         await update.message.reply_text(
@@ -260,7 +266,6 @@ async def view_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     redis_client: redis.Redis = context.bot_data["redis"]
-    # Use the helper to run the sync command
     banner_file_id = await run_redis_command(redis_client, "get", "banner_file_id")
 
     if banner_file_id:
@@ -279,7 +284,7 @@ async def view_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # post_command
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id # Capture user ID
+    user_id = update.effective_user.id 
     
     if chat_id not in ALLOWED_CHAT_IDS:
         await update.message.reply_text("Sorry, this command is only allowed in specific groups.")
@@ -295,7 +300,6 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     redis_client: redis.Redis = context.bot_data["redis"]
-    # Use the helper to run the sync command
     banner_file_id = await run_redis_command(redis_client, "get", "banner_file_id")
 
     if not banner_file_id:
@@ -324,7 +328,9 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     poster_username = data.get("maintainer_name", update.effective_user.username or update.effective_user.first_name)
     post_preview = format_post(data, poster_username, notes_list=None) 
-    keyboard = ask_notes_keyboard(device_codename, poster_username, update.effective_user.id)
+    
+    # Updated: removed poster_username from arguments
+    keyboard = ask_notes_keyboard(device_codename, update.effective_user.id)
 
     try:
         await update.message.reply_photo(
@@ -360,7 +366,6 @@ async def handle_notes_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         notes_list = [f"- {line.strip()}" for line in notes_with_html_links.split("\n") if line.strip()]
 
         device_codename = state['device_codename']
-        poster_username = state['poster_username']
         original_preview_message_id = state['original_preview_message_id']
 
         data = fetch_rom_data(device_codename)
@@ -369,8 +374,13 @@ async def handle_notes_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             del context.user_data['awaiting_notes_for']
             return
 
+        # Fetch maintainer from data again, fallback to user name
+        poster_username = data.get("maintainer_name", update.effective_user.first_name)
+
         post_with_notes = format_post(data, poster_username, notes_list)
-        keyboard = confirm_keyboard(device_codename, poster_username, user_id)
+        
+        # Updated: removed poster_username arg
+        keyboard = confirm_keyboard(device_codename, user_id)
 
         try:
             await context.bot.edit_message_caption(
@@ -401,7 +411,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle "Yes, add notes"
     if query.data.startswith("notes_yes:"):
         try:
-            _, device_codename, poster_username, expected_user_id = query.data.split(":", 3)
+            # Updated split: only 3 parts now
+            _, device_codename, expected_user_id = query.data.split(":", 2)
         except ValueError:
             await query.edit_message_text("Error: Invalid callback data format.")
             return
@@ -428,7 +439,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'original_preview_message_id': query.message.message_id,
             'prompt_message_id': prompt_msg.message_id,
             'device_codename': device_codename,
-            'poster_username': poster_username,
             'user_id': user_id
         }
         return
@@ -436,7 +446,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle "No, continue"
     if query.data.startswith("notes_no:"):
         try:
-            _, device_codename, poster_username, expected_user_id = query.data.split(":", 3)
+            # Updated split: only 3 parts now
+            _, device_codename, expected_user_id = query.data.split(":", 2)
         except ValueError:
             await query.edit_message_text("Error: Invalid callback data format.")
             return
@@ -446,7 +457,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.answer()
-        keyboard = confirm_keyboard(device_codename, poster_username, user_id)
+        # Updated keyboard call
+        keyboard = confirm_keyboard(device_codename, user_id)
         await query.edit_message_reply_markup(keyboard)
         return
 
@@ -455,7 +467,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             _, expected_user_id = query.data.split(":")
         except ValueError:
-             # Fallback if split fails
              expected_user_id = query.data.split(":")[-1]
 
         if str(user_id) != expected_user_id:
@@ -470,7 +481,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle "Confirm Send"
     if query.data.startswith("confirm_send:"):
         try:
-            _, device_codename, poster_username, expected_user_id = query.data.split(":", 3)
+            # Updated split: only 3 parts now
+            _, device_codename, expected_user_id = query.data.split(":", 2)
         except ValueError:
             await query.edit_message_text("Error: Invalid callback data format.")
             return
@@ -487,7 +499,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             target_chat_id = TEST_CHANNEL_ID
 
-        # Use the helper to run the sync command
         banner_file_id = await run_redis_command(redis_client, "get", "banner_file_id")
 
         if not banner_file_id:
@@ -502,11 +513,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Failed to re-fetch JSON data.")
             return
 
+        # Fetch Maintainer Name directly from JSON to avoid Button size limit
+        poster_username = data.get("maintainer_name", query.from_user.first_name)
+
         original_caption = query.message.caption_html
         notes_list_final = []
         if "<b>Notes:</b>" in original_caption:
             try:
-                notes_section = original_caption.split("<b>Notes:</b>\n")[1].split("\n\n")[0]
+                # Parse notes from existing caption
+                notes_part = original_caption.split("<b>Notes:</b>\n")[1]
+                # Try to split by double newline or take it all if it's at the end
+                if "\n\n" in notes_part:
+                    notes_section = notes_part.split("\n\n")[0]
+                else:
+                    notes_section = notes_part 
+                
                 notes_list_final = [line.lstrip('- ') for line in notes_section.split("\n") if line.strip()]
             except IndexError:
                 pass
