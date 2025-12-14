@@ -450,7 +450,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/banner</code> - View the currently set banner image.\n"
         "• <code>/setbanner</code> - Set post banner (Reply to photo) <b>(Admin Only)</b>.\n"
         "• <code>/removebanner</code> - Remove current banner <b>(Admin Only)</b>.\n"
-        "• <code>/adduser &lt;id&gt; &lt;gh_user&gt;</code> - Add user to build database <b>(Admin Only)</b>.\n\n"
+        "• <code>/adduser &lt;id&gt; &lt;gh_user&gt;</code> - Add user to build database <b>(Admin Only)</b>.\n"
+        "• <code>/removeuser &lt;id&gt;</code> - Remove user from database & revoke access <b>(Admin Only)</b>.\n"
+        "• <code>/revoke &lt;gh_user&gt;</code> - Directly revoke GitHub access <b>(Admin Only)</b>.\n\n"
         
         "<b>🏗️ Build System (Registered Users)</b>\n"
         "• <code>/build &lt;device&gt; &lt;manifest_url&gt;</code> - Open menu to start a Build configuration.\n"
@@ -541,6 +543,118 @@ async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
              )
         else:
              await update.message.reply_text(f"❌ Error: {result}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"Exception: {e}")
+
+# /removeuser command
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("⛔ Admin Only.")
+        return
+
+    args = context.args
+    if not args or len(args) < 1:
+        await update.message.reply_text("Usage: `/removeuser <telegram_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    target_tg_id = args[0]
+    
+    await update.message.reply_text(f"⏳ Removing user ID `{target_tg_id}`...", parse_mode=ParseMode.MARKDOWN)
+
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{USERS_JSON_PATH}"
+    headers = get_gh_headers()
+    
+    def process_removal():
+        # 1. Fetch current users.json
+        res = requests.get(url, headers=headers)
+        if res.status_code != 200:
+            return f"Failed to fetch users.json: {res.status_code}", ""
+            
+        data = res.json()
+        sha = data['sha']
+        import base64
+        content = base64.b64decode(data['content']).decode('utf-8')
+        
+        users = json.loads(content)
+        
+        # 2. Check existence
+        if str(target_tg_id) not in users:
+            return f"User ID `{target_tg_id}` not found in database.", ""
+            
+        target_gh_user = users[str(target_tg_id)]
+        
+        # 3. Remove from JSON
+        del users[str(target_tg_id)]
+        
+        # 4. Commit Update
+        new_content = json.dumps(users, indent=2)
+        new_content_encoded = base64.b64encode(new_content.encode('utf-8')).decode('utf-8')
+        
+        payload = {
+            "message": f"users: Remove @{target_gh_user} (ID: {target_tg_id})",
+            "content": new_content_encoded,
+            "sha": sha,
+            "branch": "main" 
+        }
+        
+        put_res = requests.put(url, headers=headers, json=payload)
+        if put_res.status_code not in [200, 201]:
+             return f"Failed to commit DB update: {put_res.status_code}", target_gh_user
+
+        # 5. Remove Collaborator from Repo
+        collab_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/collaborators/{target_gh_user}"
+        del_res = requests.delete(collab_url, headers=headers)
+        
+        collab_msg = ""
+        if del_res.status_code == 204:
+            collab_msg = f"\n🗑 <b>GitHub Access Revoked</b> for <code>{target_gh_user}</code>."
+        else:
+            collab_msg = f"\n⚠️ <b>Failed to Revoke Access:</b> {del_res.status_code}."
+
+        return True, collab_msg
+
+    try:
+        result, msg = await asyncio.to_thread(process_removal)
+        if result is True:
+             await update.message.reply_text(
+                 f"✅ User ID `{target_tg_id}` removed from database.{msg}", 
+                 parse_mode=ParseMode.HTML
+             )
+        else:
+             await update.message.reply_text(f"❌ Error: {result}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"Exception: {e}")
+
+# /revoke command
+async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("⛔ Admin Only.")
+        return
+
+    args = context.args
+    if not args or len(args) < 1:
+        await update.message.reply_text("Usage: `/revoke <github_username>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    target_gh_user = args[0]
+    
+    await update.message.reply_text(f"⏳ Revoking access for `{target_gh_user}`...", parse_mode=ParseMode.MARKDOWN)
+
+    headers = get_gh_headers()
+    collab_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/collaborators/{target_gh_user}"
+    
+    def process_revoke():
+        del_res = requests.delete(collab_url, headers=headers)
+        if del_res.status_code == 204:
+            return True, f"🗑 <b>Access Revoked</b> for <code>{target_gh_user}</code>."
+        elif del_res.status_code == 404:
+            return False, f"⚠️ User <code>{target_gh_user}</code> is not a collaborator."
+        else:
+            return False, f"⚠️ <b>Failed:</b> {del_res.status_code} {del_res.text}"
+
+    try:
+        success, msg = await asyncio.to_thread(process_revoke)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f"Exception: {e}")
 
@@ -1072,6 +1186,8 @@ async def main():
     app.add_handler(CommandHandler("quota", quota_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CommandHandler("adduser", add_user_command))
+    app.add_handler(CommandHandler("removeuser", remove_user_command))
+    app.add_handler(CommandHandler("revoke", revoke_command))
     
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_notes_reply))
