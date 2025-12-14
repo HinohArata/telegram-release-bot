@@ -449,7 +449,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/post &lt;codename&gt;</code> - Create and post a new ROM update (Public).\n"
         "• <code>/banner</code> - View the currently set banner image.\n"
         "• <code>/setbanner</code> - Set post banner (Reply to photo) <b>(Admin Only)</b>.\n"
-        "• <code>/removebanner</code> - Remove current banner <b>(Admin Only)</b>.\n\n"
+        "• <code>/removebanner</code> - Remove current banner <b>(Admin Only)</b>.\n"
+        "• <code>/adduser &lt;id&gt; &lt;gh_user&gt;</code> - Add user to build database <b>(Admin Only)</b>.\n\n"
         
         "<b>🏗️ Build System (Registered Users)</b>\n"
         "• <code>/build &lt;device&gt; &lt;manifest_url&gt;</code> - Open menu to start a Build configuration.\n"
@@ -460,6 +461,71 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>Note: Build commands require your Telegram ID to be linked in the user database.</i>"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
+# /adduser command
+async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("⛔ Admin Only.")
+        return
+
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text("Usage: `/adduser <telegram_id> <github_username>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    new_tg_id = args[0]
+    new_gh_user = args[1]
+    
+    await update.message.reply_text(f"⏳ Adding user `{new_gh_user}` ({new_tg_id})...", parse_mode=ParseMode.MARKDOWN)
+
+    # 1. Fetch current users.json (Need SHA for update)
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{USERS_JSON_PATH}"
+    headers = get_gh_headers()
+    
+    def update_repo():
+        # Get current file
+        res = requests.get(url, headers=headers)
+        if res.status_code != 200:
+            return f"Failed to fetch users.json: {res.status_code}"
+            
+        data = res.json()
+        sha = data['sha']
+        import base64
+        content = base64.b64decode(data['content']).decode('utf-8')
+        
+        # Update JSON
+        users = json.loads(content)
+        if str(new_tg_id) in users:
+            return f"User ID `{new_tg_id}` already exists as `{users[str(new_tg_id)]}`."
+            
+        users[str(new_tg_id)] = new_gh_user
+        
+        # Prepare Commit
+        new_content = json.dumps(users, indent=2)
+        new_content_encoded = base64.b64encode(new_content.encode('utf-8')).decode('utf-8')
+        
+        payload = {
+            "message": f"users: Add @{new_gh_user} to verified users",
+            "content": new_content_encoded,
+            "sha": sha,
+            "branch": "main" 
+        }
+        
+        # Push Update
+        put_res = requests.put(url, headers=headers, json=payload)
+        if put_res.status_code in [200, 201]:
+            return True
+        else:
+            return f"Failed to commit: {put_res.status_code} {put_res.text}"
+
+    try:
+        result = await asyncio.to_thread(update_repo)
+        if result is True:
+             await update.message.reply_text(f"✅ User `{new_gh_user}` added successfully!", parse_mode=ParseMode.MARKDOWN)
+        else:
+             await update.message.reply_text(f"❌ Error: {result}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"Exception: {e}")
 
 # /setbanner command
 async def set_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -988,6 +1054,7 @@ async def main():
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("quota", quota_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("adduser", add_user_command))
     
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_notes_reply))
