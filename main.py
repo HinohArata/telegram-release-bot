@@ -1213,6 +1213,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"<b>Type:</b> <code>{config['BUILD_TYPE']}</code>\n"
                         f"<b>Var:</b> <code>{config['BUILD_VARIANT']}</code>\n"
                         f"<b>FSGen:</b> {'❌ Disabled' if config['DISABLE_FSGEN'] == 'true' else '✅ Enabled'}\n"
+                        f"<b>Dirty:</b> {'✅ Yes' if config['DIRTY_BUILD'] == 'true' else '❌ No'}\n"
+                        f"<b>Clean:</b> {'✅ Yes' if config['CLEAN_BUILD'] == 'true' else '❌ No'}\n"
                         f"<b>Requester:</b> <a href='{requester_link}'>{config['REQUESTER']}</a>",
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True
