@@ -2,7 +2,8 @@ import os
 import requests
 import asyncio
 import html
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 import re
 import redis
 from functools import partial
@@ -27,6 +28,13 @@ BASE_URL = "https://raw.githubusercontent.com/AfterlifeOS/device_afterlife_ota/r
 DONATE_URL = "https://t.me/donate_zero/6"
 AFL_SUPPORT = "https://t.me/AfterLifeOS"
 SOURCE_CHANGELOGS_URL = "https://afterlifeos.com/changelog/"
+
+# Jenkins/Build Bot Config
+GH_PAT = os.environ.get("GH_PAT")
+REPO_OWNER = "AfterlifeOS"
+REPO_NAME = "AfterlifeOS-Builder"
+WORKFLOW_FILE = "afterlife_build.yml"
+USERS_JSON_PATH = "users.json"
 
 # === Testing Env ===
 TEST_GROUP_ID = int(os.environ.get("TEST_GROUP_ID", "0"))
@@ -199,7 +207,255 @@ def ask_notes_keyboard(device_codename, user_id):
         [InlineKeyboardButton("No, continue", callback_data=f"notes_no:{device_codename}:{user_id}")]
     ])
 
+# === BUILD BOT HELPERS ===
+def get_gh_headers():
+    return {
+        "Authorization": f"token {GH_PAT}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+def fetch_users_db():
+    url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{USERS_JSON_PATH}"
+    try:
+        res = requests.get(url, headers=get_gh_headers())
+        if res.status_code == 200:
+            return res.json()
+    except Exception as e:
+        print(f"Error fetching users: {e}")
+    return {}
+
+def get_requester(user_id, users_db):
+    return users_db.get(str(user_id))
+
+# === BUILD MENU HELPERS ===
+def get_build_config_text(config):
+    return (
+        f"🛠 <b>Build Configuration</b>\n"
+        f"<b>Device:</b> <code>{config['DEVICE']}</code>\n"
+        f"<b>Manifest:</b> <a href='{config['LOCAL_MANIFEST_URL']}'>Link</a>\n"
+        f"<b>Type:</b> <code>{config['BUILD_TYPE']}</code>\n"
+        f"<b>Variant:</b> <code>{config['BUILD_VARIANT']}</code>\n"
+        f"<b>FSGen:</b> {'❌ Disabled' if config['DISABLE_FSGEN'] == 'true' else '✅ Enabled'}\n"
+        f"<b>Dirty:</b> {'✅ Yes' if config['DIRTY_BUILD'] == 'true' else '❌ No'}\n"
+        f"<b>Clean:</b> {'✅ Yes' if config['CLEAN_BUILD'] == 'true' else '❌ No'}"
+    )
+
+def get_build_keyboard(config, is_admin):
+    # Icons
+    t_icon = "🔨"
+    v_icon = "📦"
+    fs_icon = "💀" if config['DISABLE_FSGEN'] == 'true' else "🧬"
+    d_icon = "⚡️" if config['DIRTY_BUILD'] == 'true' else "🧹"
+    c_icon = "✨" if config['CLEAN_BUILD'] == 'true' else "🗑"
+
+    # Buttons
+    row1 = [
+        InlineKeyboardButton(f"{t_icon} Type: {config['BUILD_TYPE']}", callback_data="bmenu_type"),
+        InlineKeyboardButton(f"{v_icon} Var: {config['BUILD_VARIANT']}", callback_data="bmenu_var")
+    ]
+    row2 = [
+        InlineKeyboardButton(f"{fs_icon} FSGen: {'OFF' if config['DISABLE_FSGEN'] == 'true' else 'ON'}", callback_data="bmenu_fsg"),
+        InlineKeyboardButton(f"{d_icon} Dirty: {'ON' if config['DIRTY_BUILD'] == 'true' else 'OFF'}", callback_data="bmenu_dirty")
+    ]
+    
+    row3 = []
+    if is_admin:
+         row3.append(InlineKeyboardButton(f"{c_icon} Clean: {'ON' if config['CLEAN_BUILD'] == 'true' else 'OFF'}", callback_data="bmenu_clean"))
+    else:
+         row3.append(InlineKeyboardButton("🔒 Clean (Admin Only)", callback_data="bmenu_locked"))
+
+    row4 = [
+        InlineKeyboardButton("🚀 START BUILD", callback_data="bmenu_start"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bmenu_cancel")
+    ]
+
+    return InlineKeyboardMarkup([row1, row2, row3, row4])
+
 # === COMMANDS ===
+
+# /build command
+async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not GH_PAT:
+        await update.message.reply_text("⛔ Admin has not configured GH_PAT.")
+        return
+
+    users_db = await asyncio.to_thread(fetch_users_db)
+    requester = get_requester(update.effective_user.id, users_db)
+    
+    if not requester:
+        await update.message.reply_text("⛔ Access Denied: Your Telegram ID is not registered in `users.json`.")
+        return
+
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "⚠️ *Invalid Format*\nUsage: `/build <device> <manifest_url>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    device = args[0]
+    manifest_url = args[1]
+
+    # Clean up manifest URL if user included 'manifest=' prefix
+    if manifest_url.startswith("manifest="):
+        manifest_url = manifest_url.split("=", 1)[1]
+
+    # Default Config
+    config = {
+        "DEVICE": device,
+        "LOCAL_MANIFEST_URL": manifest_url,
+        "BUILD_TYPE": "userdebug",
+        "BUILD_VARIANT": "Test",
+        "CLEAN_BUILD": "false",
+        "DIRTY_BUILD": "false",
+        "DISABLE_FSGEN": "false",
+        "REQUESTER": requester
+    }
+
+    # Save to context (keyed by user_id to avoid conflicts)
+    context.user_data['build_config'] = config
+    
+    # Check Admin for Clean Build UI
+    is_admin = update.effective_user.id in ADMIN_USER_IDS
+
+    await update.message.reply_text(
+        get_build_config_text(config),
+        reply_markup=get_build_keyboard(config, is_admin),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+# /status command
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not GH_PAT: return
+    
+    users_db = await asyncio.to_thread(fetch_users_db)
+    if not get_requester(update.effective_user.id, users_db): return
+    
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
+    
+    def fetch_status():
+        return requests.get(url, headers=get_gh_headers())
+
+    try:
+        res = await asyncio.to_thread(fetch_status)
+        data = res.json()
+        count = data.get('total_count', 0)
+        
+        if count == 0:
+            await update.message.reply_text("✅ No active builds at the moment.")
+        else:
+            msg = f"🔄 *Active Builds ({count}):*\n"
+            for run in data.get('workflow_runs', []):
+                msg += f"- `{run['name']}`\n  Trigger: `{run['actor']['login']}`\n  ID: `{run['id']}`\n  [View Log]({run['html_url']})\n\n"
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+# /quota command
+async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not GH_PAT: return
+
+    users_db = await asyncio.to_thread(fetch_users_db)
+    requester = get_requester(update.effective_user.id, users_db)
+    if not requester: return
+
+    url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/.github/workflow_counter.json"
+    
+    try:
+        res = await asyncio.to_thread(requests.get, url, headers=get_gh_headers())
+        if res.status_code != 200:
+            await update.message.reply_text("⚠️ Failed to fetch quota data.")
+            return
+            
+        data = res.json()
+        user_data = data.get(requester, {})
+        
+        # Get Today's Date in UTC
+        now = datetime.utcnow()
+        today_utc = now.strftime("%Y-%m-%d")
+        usage_today = user_data.get(today_utc, 0)
+        
+        # Calculate time until next 00:00 UTC
+        tomorrow = now + timedelta(days=1)
+        next_reset = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+        diff = next_reset - now
+        hours = diff.seconds // 3600
+        minutes = (diff.seconds % 3600) // 60
+        
+        msg = (
+            f"📊 <b>Quota Statistics</b>\n"
+            f"<b>User:</b> <code>{requester}</code>\n"
+            f"<b>Date (UTC):</b> {today_utc}\n"
+            f"<b>Usage Today:</b> {usage_today} builds\n"
+            f"<b>Reset In:</b> {hours}h {minutes}m"
+        )
+        
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+# /cancel command
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not GH_PAT: return
+
+    users_db = await asyncio.to_thread(fetch_users_db)
+    if not get_requester(update.effective_user.id, users_db): return
+
+    # Check active builds
+    status_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
+    
+    try:
+        res = await asyncio.to_thread(requests.get, status_url, headers=get_gh_headers())
+        data = res.json()
+        
+        if data.get('total_count', 0) == 0:
+            await update.message.reply_text("No active builds to cancel.")
+            return
+
+        args = context.args
+        target_id = None
+        
+        if len(args) > 0:
+            target_id = args[0]
+        elif data['total_count'] == 1:
+            target_id = data['workflow_runs'][0]['id']
+        else:
+            await update.message.reply_text("⚠️ Multiple builds active. Use `/cancel <run_id>`.\nCheck IDs with `/status`.")
+            return
+
+        cancel_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs/{target_id}/cancel"
+        
+        res_cancel = await asyncio.to_thread(requests.post, cancel_url, headers=get_gh_headers())
+        
+        if res_cancel.status_code == 202:
+            await update.message.reply_text(f"🛑 Cancel signal sent to Run ID: `{target_id}`", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(f"❌ Failed to cancel. Code: {res_cancel.status_code}")
+
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+# /help command
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🤖 <b>AfterlifeOS Bot Commands</b>\n\n"
+        "<b>📢 Channel Management</b>\n"
+        "• <code>/post &lt;codename&gt;</code> - Create and post a new ROM update (Public).\n"
+        "• <code>/banner</code> - View the currently set banner image.\n"
+        "• <code>/setbanner</code> - Set post banner (Reply to photo) <b>(Admin Only)</b>.\n"
+        "• <code>/removebanner</code> - Remove current banner <b>(Admin Only)</b>.\n\n"
+        
+        "<b>🏗️ Build System (Registered Users)</b>\n"
+        "• <code>/build &lt;device&gt; &lt;manifest_url&gt;</code> - Open menu to start a Build configuration.\n"
+        "• <code>/status</code> - Check active build queue.\n"
+        "• <code>/quota</code> - Check daily build quota (UTC).\n"
+        "• <code>/cancel [run_id]</code> - Cancel your running build.\n\n"
+        
+        "<i>Note: Build commands require your Telegram ID to be linked in the user database.</i>"
+    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 # /setbanner command
 async def set_banner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,10 +550,11 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != OWNER_ID:
             await update.message.reply_text("⛔ In this test group, only the Owner is allowed to post.")
             return
-    else:
-        if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("Sorry, you are not authorized to use this command.")
-            return
+    # else:
+        # In other allowed groups, ANYONE can post.
+        # Previously: if user_id not in ADMIN_USER_IDS: return error
+        # Now: No check needed, proceed.
+        pass
 
     redis_client: redis.Redis = context.bot_data["redis"]
     banner_file_id = await run_redis_command(redis_client, "get", "banner_file_id")
@@ -575,6 +832,107 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"[ERROR] Sending photo failed: {e}")
             await query.message.reply_text(f"Failed to send to channel: {e}")
+        return
+
+    # === BUILD MENU HANDLER ===
+    if query.data.startswith("bmenu_"):
+        config = context.user_data.get('build_config')
+        if not config:
+            await query.answer("Session expired. Please run /build again.", show_alert=True)
+            return
+
+        action = query.data.split("_")[1]
+        is_admin = user_id in ADMIN_USER_IDS
+
+        # 1. HANDLE TOGGLES/CYCLES
+        if action == "type":
+            # Cycle: userdebug -> user -> eng
+            modes = ["userdebug", "user", "eng"]
+            curr = config['BUILD_TYPE']
+            try:
+                idx = modes.index(curr)
+                config['BUILD_TYPE'] = modes[(idx + 1) % len(modes)]
+            except ValueError:
+                config['BUILD_TYPE'] = "userdebug"
+            await query.answer(f"Type set to {config['BUILD_TYPE']}")
+
+        elif action == "var":
+            # Cycle: Test -> Release
+            config['BUILD_VARIANT'] = "Release" if config['BUILD_VARIANT'] == "Test" else "Test"
+            await query.answer(f"Variant set to {config['BUILD_VARIANT']}")
+
+        elif action == "fsg":
+            # Toggle 'DISABLE_FSGEN' (true <-> false)
+            # Note: UI says "FSGen: ON" which means DISABLE=false
+            config['DISABLE_FSGEN'] = "false" if config['DISABLE_FSGEN'] == "true" else "true"
+            status = "Disabled" if config['DISABLE_FSGEN'] == "true" else "Enabled"
+            await query.answer(f"FSGen {status}")
+
+        elif action == "dirty":
+            config['DIRTY_BUILD'] = "true" if config['DIRTY_BUILD'] == "false" else "false"
+            await query.answer(f"Dirty Build: {config['DIRTY_BUILD']}")
+
+        elif action == "clean":
+            if not is_admin:
+                await query.answer("⛔ Admin Only!", show_alert=True)
+            else:
+                config['CLEAN_BUILD'] = "true" if config['CLEAN_BUILD'] == "false" else "false"
+                await query.answer(f"Clean Build: {config['CLEAN_BUILD']}")
+
+        elif action == "locked":
+             await query.answer("⛔ This option is locked for Admins.", show_alert=True)
+             return
+
+        elif action == "cancel":
+            del context.user_data['build_config']
+            await query.edit_message_text("❌ Build Configuration Cancelled.")
+            return
+
+        elif action == "start":
+            # EXECUTE BUILD
+            await query.edit_message_text("🚀 Submitting Build Request...")
+            
+            # Use repository_dispatch
+            url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/dispatches"
+            payload = {
+                "event_type": "Telegram-Builder",
+                "client_payload": config
+            }
+            
+            def trigger():
+                return requests.post(url, json=payload, headers=get_gh_headers())
+
+            try:
+                res = await asyncio.to_thread(trigger)
+                if res.status_code == 204:
+                    requester_link = f"https://github.com/{config['REQUESTER']}"
+                    await query.message.reply_text(
+                        f"✅ <b>Build Request Sent!</b>\n"
+                        f"<b>Device:</b> <code>{config['DEVICE']}</code>\n"
+                        f"<b>Type:</b> <code>{config['BUILD_TYPE']}</code>\n"
+                        f"<b>Var:</b> <code>{config['BUILD_VARIANT']}</code>\n"
+                        f"<b>FSGen:</b> {'❌ Disabled' if config['DISABLE_FSGEN'] == 'true' else '✅ Enabled'}\n"
+                        f"<b>Requester:</b> <a href='{requester_link}'>{config['REQUESTER']}</a>",
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                else:
+                    await query.message.reply_text(f"❌ Failed to trigger. Code: {res.status_code}\n{res.text}")
+            except Exception as e:
+                await query.message.reply_text(f"Error: {e}")
+            
+            # Cleanup
+            del context.user_data['build_config']
+            return
+
+        # UPDATE UI (If not start/cancel)
+        await query.edit_message_text(
+            get_build_config_text(config),
+            reply_markup=get_build_keyboard(config, is_admin),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
 
 # main() function
 async def main():
@@ -603,10 +961,18 @@ async def main():
     app.bot_data["redis"] = redis_client
     
     # ... (Handlers are added just as before) ...
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("banner", view_banner_command))
     app.add_handler(CommandHandler("setbanner", set_banner_command))
     app.add_handler(CommandHandler("removebanner", remove_banner_command))
+    
+    # Build Bot Handlers
+    app.add_handler(CommandHandler("build", build_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("quota", quota_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+    
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_notes_reply))
 
