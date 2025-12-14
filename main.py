@@ -514,14 +514,31 @@ async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Push Update
         put_res = requests.put(url, headers=headers, json=payload)
         if put_res.status_code in [200, 201]:
-            return True
+            # === AUTO-INVITE COLLABORATOR (READ ONLY) ===
+            invite_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/collaborators/{new_gh_user}"
+            invite_payload = {"permission": "pull"} # 'pull' = Read permission
+            
+            invite_res = requests.put(invite_url, headers=headers, json=invite_payload)
+            
+            invite_msg = ""
+            if invite_res.status_code == 201:
+                invite_msg = "\n📩 <b>Invitation Sent!</b> User needs to accept email invite."
+            elif invite_res.status_code == 204:
+                invite_msg = "\n✅ <b>Already a Collaborator.</b> Permission set to Read."
+            else:
+                invite_msg = f"\n⚠️ <b>Invite Failed:</b> {invite_res.status_code} {invite_res.text}"
+
+            return True, invite_msg
         else:
-            return f"Failed to commit: {put_res.status_code} {put_res.text}"
+            return f"Failed to commit: {put_res.status_code} {put_res.text}", ""
 
     try:
-        result = await asyncio.to_thread(update_repo)
+        result, msg = await asyncio.to_thread(update_repo)
         if result is True:
-             await update.message.reply_text(f"✅ User `{new_gh_user}` added successfully!", parse_mode=ParseMode.MARKDOWN)
+             await update.message.reply_text(
+                 f"✅ User `{new_gh_user}` added to database!{msg}", 
+                 parse_mode=ParseMode.HTML
+             )
         else:
              await update.message.reply_text(f"❌ Error: {result}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
