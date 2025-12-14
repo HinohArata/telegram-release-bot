@@ -240,7 +240,7 @@ def get_build_config_text(config):
         f"<b>Clean:</b> {'✅ Yes' if config['CLEAN_BUILD'] == 'true' else '❌ No'}"
     )
 
-def get_build_keyboard(config, is_admin):
+def get_build_keyboard(config, is_admin, user_id):
     # Icons
     t_icon = "🔨"
     v_icon = "📦"
@@ -248,25 +248,29 @@ def get_build_keyboard(config, is_admin):
     d_icon = "⚡️" if config['DIRTY_BUILD'] == 'true' else "🧹"
     c_icon = "✨" if config['CLEAN_BUILD'] == 'true' else "🗑"
 
+    # Helper to append user_id
+    def cb(action):
+        return f"bmenu_{action}:{user_id}"
+
     # Buttons
     row1 = [
-        InlineKeyboardButton(f"{t_icon} Type: {config['BUILD_TYPE']}", callback_data="bmenu_type"),
-        InlineKeyboardButton(f"{v_icon} Var: {config['BUILD_VARIANT']}", callback_data="bmenu_var")
+        InlineKeyboardButton(f"{t_icon} Type: {config['BUILD_TYPE']}", callback_data=cb("type")),
+        InlineKeyboardButton(f"{v_icon} Var: {config['BUILD_VARIANT']}", callback_data=cb("var"))
     ]
     row2 = [
-        InlineKeyboardButton(f"{fs_icon} FSGen: {'OFF' if config['DISABLE_FSGEN'] == 'true' else 'ON'}", callback_data="bmenu_fsg"),
-        InlineKeyboardButton(f"{d_icon} Dirty: {'ON' if config['DIRTY_BUILD'] == 'true' else 'OFF'}", callback_data="bmenu_dirty")
+        InlineKeyboardButton(f"{fs_icon} FSGen: {'OFF' if config['DISABLE_FSGEN'] == 'true' else 'ON'}", callback_data=cb("fsg")),
+        InlineKeyboardButton(f"{d_icon} Dirty: {'ON' if config['DIRTY_BUILD'] == 'true' else 'OFF'}", callback_data=cb("dirty"))
     ]
     
     row3 = []
     if is_admin:
-         row3.append(InlineKeyboardButton(f"{c_icon} Clean: {'ON' if config['CLEAN_BUILD'] == 'true' else 'OFF'}", callback_data="bmenu_clean"))
+         row3.append(InlineKeyboardButton(f"{c_icon} Clean: {'ON' if config['CLEAN_BUILD'] == 'true' else 'OFF'}", callback_data=cb("clean")))
     else:
-         row3.append(InlineKeyboardButton("🔒 Clean (Admin Only)", callback_data="bmenu_locked"))
+         row3.append(InlineKeyboardButton("🔒 Clean (Admin Only)", callback_data=cb("locked")))
 
     row4 = [
-        InlineKeyboardButton("🚀 START BUILD", callback_data="bmenu_start"),
-        InlineKeyboardButton("❌ Cancel", callback_data="bmenu_cancel")
+        InlineKeyboardButton("🚀 START BUILD", callback_data=cb("start")),
+        InlineKeyboardButton("❌ Cancel", callback_data=cb("cancel"))
     ]
 
     return InlineKeyboardMarkup([row1, row2, row3, row4])
@@ -321,7 +325,7 @@ async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         get_build_config_text(config),
-        reply_markup=get_build_keyboard(config, is_admin),
+        reply_markup=get_build_keyboard(config, is_admin, update.effective_user.id),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
@@ -836,12 +840,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === BUILD MENU HANDLER ===
     if query.data.startswith("bmenu_"):
+        try:
+            # Format: bmenu_action:user_id
+            raw_action, expected_user_id = query.data.split(":", 1)
+            action = raw_action.split("_")[1]
+        except ValueError:
+            await query.answer("Invalid data", show_alert=True)
+            return
+
+        # STRICT OWNERSHIP CHECK
+        if str(user_id) != expected_user_id:
+            await query.answer("⛔ This is not your menu!", show_alert=True)
+            return
+
         config = context.user_data.get('build_config')
         if not config:
             await query.answer("Session expired. Please run /build again.", show_alert=True)
             return
 
-        action = query.data.split("_")[1]
         is_admin = user_id in ADMIN_USER_IDS
 
         # 1. HANDLE TOGGLES/CYCLES
@@ -928,7 +944,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # UPDATE UI (If not start/cancel)
         await query.edit_message_text(
             get_build_config_text(config),
-            reply_markup=get_build_keyboard(config, is_admin),
+            reply_markup=get_build_keyboard(config, is_admin, user_id),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
