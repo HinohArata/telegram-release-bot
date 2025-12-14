@@ -204,7 +204,8 @@ def confirm_keyboard(device_codename, user_id):
 def ask_notes_keyboard(device_codename, user_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Yes, add notes", callback_data=f"notes_yes:{device_codename}:{user_id}")],
-        [InlineKeyboardButton("No, continue", callback_data=f"notes_no:{device_codename}:{user_id}")]
+        [InlineKeyboardButton("No, continue", callback_data=f"notes_no:{device_codename}:{user_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_post:{user_id}")]
     ])
 
 # === BUILD BOT HELPERS ===
@@ -882,6 +883,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await query.edit_message_reply_markup(None)
         
+        # Navigation Buttons for Notes Stage
+        nav_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"notes_back:{device_codename}:{user_id}")],
+            [InlineKeyboardButton("❌ Cancel Post", callback_data=f"cancel_post:{user_id}")]
+        ])
+        
         prompt_msg = await query.message.reply_text(
             "Please reply to this message with your notes\\.\n"
             "Separate each note with a new line\\.\n\n"
@@ -889,10 +896,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Example:\n"
             "Initial Build\n"
             "Use this \\[Recovery\\] \\(https://t\\.me/HinohArata\\)",
-            reply_markup=ForceReply(selective=True),
+            reply_markup=nav_keyboard, # Add buttons here (Use standard keyboard, ForceReply might conflict visually but usually ok)
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
+        
+        # Note: We cannot attach InlineKeyboard to a ForceReply object directly in the same message easily 
+        # without verify logic. Usually ForceReply is just an interface.
+        # BETTER UX: Send the instruction with InlineKeyboard. User just replies normally (no ForceReply object needed strictly if we track state).
+        # However, to keep it consistent with your existing handle_notes_reply logic (which relies on reply_to_message_id), 
+        # we need to keep the message accessible.
+        
         context.user_data['awaiting_notes_for'] = {
             'original_preview_message_id': query.message.message_id,
             'prompt_message_id': prompt_msg.message_id,
@@ -920,6 +933,49 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(keyboard)
         return
 
+    # Handle "Back" from Notes Input
+    if query.data.startswith("notes_back:"):
+        try:
+            _, device_codename, expected_user_id = query.data.split(":", 2)
+        except ValueError:
+            await query.answer("Invalid data", show_alert=True)
+            return
+
+        if str(user_id) != expected_user_id:
+            await query.answer("Not allowed.", show_alert=True)
+            return
+
+        await query.answer()
+        
+        # 1. Delete the prompt message (the one with the Back button)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # 2. Restore the original preview message's keyboard (Yes/No Notes)
+        # We need to find the original message ID from context if possible, 
+        # OR we just rely on the fact that the prompt is separate.
+        # Actually, the original message is the one that triggered 'notes_yes'.
+        # But we edited its markup to None. We need to restore it.
+        
+        if 'awaiting_notes_for' in context.user_data:
+            orig_msg_id = context.user_data['awaiting_notes_for']['original_preview_message_id']
+            try:
+                # Restore "Yes/No" keyboard on the photo preview
+                await context.bot.edit_message_reply_markup(
+                    chat_id=query.message.chat.id,
+                    message_id=orig_msg_id,
+                    reply_markup=ask_notes_keyboard(device_codename, user_id)
+                )
+            except Exception as e:
+                print(f"Failed to restore keyboard: {e}")
+            
+            # Clear state
+            del context.user_data['awaiting_notes_for']
+        
+        return
+
     # Handle "Cancel"
     if query.data.startswith("cancel_post:"):
         try:
@@ -932,8 +988,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_reply_markup(None)
         await query.message.reply_text("❌ Post canceled.")
+        
+        # If cancelling from the "Notes Prompt" message, we should try to restore/clean the original preview too if needed,
+        # or just leave it without markup (already done).
+        # But crucially, we must check if we are in 'awaiting_notes' state to delete the prompt itself if this click came from there.
+        
         if 'awaiting_notes_for' in context.user_data:
+            state = context.user_data['awaiting_notes_for']
+            # If the cancel button clicked was ON the prompt message, deleting query.message handles it.
+            # If it was on the original preview (though we remove markup there), rare case.
+            
+            # If we are cancelling, we might want to delete the original preview photo too to be clean?
+            # Let's delete the original preview to be thorough.
+            try:
+                await context.bot.delete_message(chat_id=query.message.chat.id, message_id=state['original_preview_message_id'])
+            except Exception:
+                pass
+            
+            # Also delete prompt if the click didn't come from it (e.g. some other flow)
+            # But here query.message IS the prompt (if back/cancel buttons are on it).
+            # If query.message is the Preview (standard cancel), we just deleted markup. 
+            # Let's just try to delete the message that triggered this callback.
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
             del context.user_data['awaiting_notes_for']
+        else:
+            # Standard cancel from Preview
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
         return
 
     # Handle "Confirm Send"
