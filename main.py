@@ -1397,7 +1397,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 2. Trigger GitHub Dispatch with TG_MSG_ID
             url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/dispatches"
             
-            # Construct optimized payload (Limit 10 properties)
+            # Construct optimized payload (Groupped for Scalability)
             # Grouping Telegram Meta info
             tg_meta = {
                 "id": user_id
@@ -1405,19 +1405,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if msg_id:
                 tg_meta["msg_id"] = msg_id
             
-            # Create a clean copy for payload to avoid modifying the session config directly
-            final_payload = config.copy()
-            final_payload['TG_META'] = tg_meta
+            # Construct Final Payload
+            # Top Level: Core IDs & Sources
+            # BUILD_CONFIG: All build flags/options (To save property slots)
+            final_payload = {
+                "DEVICE": config['DEVICE'],
+                "LOCAL_MANIFEST_URL": config['LOCAL_MANIFEST_URL'],
+                "REQUESTER": config['REQUESTER'],
+                "TG_META": tg_meta,
+                "BUILD_CONFIG": {
+                    "BUILD_TYPE": config['BUILD_TYPE'],
+                    "BUILD_VARIANT": config['BUILD_VARIANT'],
+                    "GAPPS_VARIANT": config['GAPPS_VARIANT'],
+                    "CLEAN_BUILD": config['CLEAN_BUILD'],
+                    "DIRTY_BUILD": config['DIRTY_BUILD'],
+                    "DISABLE_FSGEN": config['DISABLE_FSGEN']
+                }
+            }
             
-            # Remove keys if they exist (though they shouldn't be in config yet)
-            final_payload.pop('TG_MSG_ID', None)
-            final_payload.pop('TG_USER_ID', None)
-            # Requestor is needed, others are needed. 
-            
-            # Current Count: 
-            # 1. DEVICE, 2. LOCAL_MANIFEST_URL, 3. BUILD_TYPE, 4. BUILD_VARIANT, 5. GAPPS_VARIANT
-            # 6. CLEAN_BUILD, 7. DIRTY_BUILD, 8. DISABLE_FSGEN, 9. REQUESTER, 10. TG_META
-            # Total: 10 (EXACT LIMIT)
+            # Current Property Count: 5 (Safe limit is 10)
             
             payload = {
                 "event_type": "Telegram-Builder",
