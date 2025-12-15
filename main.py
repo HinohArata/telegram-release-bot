@@ -297,7 +297,12 @@ async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     requester = get_requester(update.effective_user.id, users_db)
     
     if not requester:
-        await update.message.reply_text("⛔ Access Denied: Your Telegram ID is not registered in `users.json`.")
+        await update.message.reply_text(
+            "⛔ <b>Access Denied</b>\n"
+            "You are not registered in the build system.\n"
+            "Contact an Admin to verify your account.",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     args = context.args
@@ -350,7 +355,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not GH_PAT: return
     
     users_db = await asyncio.to_thread(fetch_users_db)
-    if not get_requester(update.effective_user.id, users_db): return
+    if not get_requester(update.effective_user.id, users_db):
+        await update.message.reply_text(
+            "⛔ <b>Access Denied</b>\n"
+            "You are not registered in the build system.",
+            parse_mode=ParseMode.HTML
+        )
+        return
     
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
     
@@ -410,7 +421,14 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     users_db = await asyncio.to_thread(fetch_users_db)
     requester = get_requester(update.effective_user.id, users_db)
-    if not requester: return
+    
+    if not requester:
+        await update.message.reply_text(
+            "⛔ <b>Access Denied</b>\n"
+            "You are not registered in the build system.",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
     url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/.github/workflow_counter.json"
     
@@ -475,7 +493,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not GH_PAT: return
 
     users_db = await asyncio.to_thread(fetch_users_db)
-    if not get_requester(update.effective_user.id, users_db): return
+    if not get_requester(update.effective_user.id, users_db):
+        await update.message.reply_text(
+            "⛔ <b>Access Denied</b>\n"
+            "You are not registered in the build system.",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
     # Check active builds
     status_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
