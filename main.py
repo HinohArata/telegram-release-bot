@@ -22,6 +22,15 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path='private.env')
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_TOPIC_ID = os.environ.get("TELEGRAM_TOPIC_ID")
+if TELEGRAM_TOPIC_ID:
+    try:
+        TELEGRAM_TOPIC_ID = int(TELEGRAM_TOPIC_ID)
+    except ValueError:
+        print(f"[WARNING] Invalid TELEGRAM_TOPIC_ID: {TELEGRAM_TOPIC_ID}")
+        TELEGRAM_TOPIC_ID = None
+
 REDIS_URL = os.environ.get("REDIS_URL")
 STICKER_ID = os.environ.get("STICKER_ID")
 BASE_URL = "https://raw.githubusercontent.com/AfterlifeOS/device_afterlife_ota/refs/heads/16"
@@ -306,6 +315,11 @@ async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if manifest_url.startswith("manifest="):
         manifest_url = manifest_url.split("=", 1)[1]
 
+    # AUTO-CONVERT GitHub Blob -> Raw
+    if "github.com" in manifest_url and "/blob/" in manifest_url:
+        manifest_url = manifest_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        # Optionally warn/notify user? No, silent fix is smoother UX.
+
     # Default Config
     config = {
         "DEVICE": device,
@@ -351,9 +365,41 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if count == 0:
             await update.message.reply_text("✅ No active builds at the moment.")
         else:
+            redis_client: redis.Redis = context.bot_data["redis"]
             msg = f"🔄 *Active Builds ({count}):*\n"
+            
             for run in data.get('workflow_runs', []):
-                msg += f"- `{run['name']}`\n  Trigger: `{run['actor']['login']}`\n  ID: `{run['id']}`\n  [View Log]({run['html_url']})\n\n"
+                actor = run['actor']['login']
+                
+                # Try to get linked Message ID
+                tg_link = ""
+                try:
+                    # We stored it as build_msg:<gh_user> -> "chat_id:msg_id"
+                    redis_val = await run_redis_command(redis_client, "get", f"build_msg:{actor}")
+                    
+                    if redis_val:
+                        if ":" in redis_val:
+                            target_chat_id, target_msg_id = redis_val.split(":")
+                        else:
+                            # Fallback for old keys
+                            target_chat_id = str(CHANNEL_ID)
+                            target_msg_id = redis_val
+                        
+                        # Construct Link (Private Group/Channel style)
+                        # Remove -100 prefix
+                        clean_id = str(target_chat_id).replace("-100", "")
+                        
+                        if TELEGRAM_TOPIC_ID:
+                            link_url = f"https://t.me/c/{clean_id}/{TELEGRAM_TOPIC_ID}/{target_msg_id}"
+                        else:
+                            link_url = f"https://t.me/c/{clean_id}/{target_msg_id}"
+                            
+                        tg_link = f"\n  [See monitor progress]({link_url})"
+                except Exception:
+                    pass
+
+                msg += f"- `{run['name']}`\n  Trigger: `{actor}`\n  ID: `{run['id']}`\n  [View Log]({run['html_url']}){tg_link}\n\n"
+            
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
@@ -1191,10 +1237,77 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "start":
             # EXECUTE BUILD
-            await query.edit_message_text("🚀 Submitting Build Request...")
+            await query.answer("🚀 Starting...")
             
-            # Use repository_dispatch
+            # 1. Send Initial "Queued" Message to Channel/Chat
+            # Send to the TELEGRAM_CHAT_ID defined in env (syncs with GitHub Actions)
+            target_chat_id = TELEGRAM_CHAT_ID
+
+            try:
+                # Send placeholder message
+                bot = ContextTypes.DEFAULT_TYPE(app).bot if not context.bot else context.bot
+                
+                # Format Boolean to Human Readable
+                fsgen_status = "❌ Disabled" if config['DISABLE_FSGEN'] == "true" else "✅ Enabled"
+                dirty_status = "✅ Yes" if config['DIRTY_BUILD'] == "true" else "❌ No"
+                clean_status = "✅ Yes" if config['CLEAN_BUILD'] == "true" else "❌ No"
+
+                try:
+                    # Try sending to specific Topic first
+                    queued_msg = await context.bot.send_message(
+                        chat_id=target_chat_id,
+                        message_thread_id=TELEGRAM_TOPIC_ID,
+                        text=f"⏳ *Build Request Queued*\n"
+                             f"*Device:* `{config['DEVICE']}`\n"
+                             f"*Type:* `{config['BUILD_TYPE']}`\n"
+                             f"*Variant:* `{config['BUILD_VARIANT']}`\n"
+                             f"*FSGen:* `{fsgen_status}`\n"
+                             f"*Dirty:* `{dirty_status}`\n"
+                             f"*Clean:* `{clean_status}`\n"
+                             f"*User:* `{config['REQUESTER']}`\n"
+                             f"Handing over to GitHub Actions...",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to send to Topic {TELEGRAM_TOPIC_ID}: {e}. Fallback to General/Current Thread.")
+                    # Fallback: Send to the thread where command was issued (or General)
+                    queued_msg = await context.bot.send_message(
+                        chat_id=target_chat_id,
+                        message_thread_id=query.message.message_thread_id,
+                        text=f"⏳ *Build Request Queued (Fallback)*\n"
+                             f"*Device:* `{config['DEVICE']}`\n"
+                             f"*Type:* `{config['BUILD_TYPE']}`\n"
+                             f"*Variant:* `{config['BUILD_VARIANT']}`\n"
+                             f"*FSGen:* `{fsgen_status}`\n"
+                             f"*Dirty:* `{dirty_status}`\n"
+                             f"*Clean:* `{clean_status}`\n"
+                             f"*User:* `{config['REQUESTER']}`\n"
+                             f"Handing over to GitHub Actions...",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+
+                msg_id = queued_msg.message_id
+                
+                # Save to Redis for /status linking
+                # Key: build_msg:<gh_user> (Simplification: assuming 1 active build per user usually)
+                # Value: chat_id:message_id
+                await run_redis_command(redis_client, "setex", f"build_msg:{config['REQUESTER']}", 86400, f"{target_chat_id}:{msg_id}")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to send queue message: {e}")
+                msg_id = None
+
+            # 2. Trigger GitHub Dispatch with TG_MSG_ID
             url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/dispatches"
+            
+            # Inject TG_MSG_ID into payload
+            if msg_id:
+                config['TG_MSG_ID'] = msg_id
+                # Also pass Chat ID if needed, but secrets handle that mostly
+            
+            # Pass Telegram User ID for tagging
+            config['TG_USER_ID'] = user_id
+            
             payload = {
                 "event_type": "Telegram-Builder",
                 "client_payload": config
@@ -1207,22 +1320,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 res = await asyncio.to_thread(trigger)
                 if res.status_code == 204:
                     requester_link = f"https://github.com/{config['REQUESTER']}"
-                    await query.message.reply_text(
+                    
+                    # Generate Link
+                    link_text = ""
+                    if msg_id:
+                        # Fix Chat ID for link (remove -100)
+                        clean_id = str(target_chat_id).replace("-100", "")
+                        
+                        if TELEGRAM_TOPIC_ID:
+                            link_url = f"https://t.me/c/{clean_id}/{TELEGRAM_TOPIC_ID}/{msg_id}"
+                        else:
+                            link_url = f"https://t.me/c/{clean_id}/{msg_id}"
+                            
+                        link_text = f"\n📡 <a href='{link_url}'>See monitor progress</a>"
+                    
+                    await query.edit_message_text(
                         f"✅ <b>Build Request Sent!</b>\n"
                         f"<b>Device:</b> <code>{config['DEVICE']}</code>\n"
                         f"<b>Type:</b> <code>{config['BUILD_TYPE']}</code>\n"
-                        f"<b>Var:</b> <code>{config['BUILD_VARIANT']}</code>\n"
-                        f"<b>FSGen:</b> {'❌ Disabled' if config['DISABLE_FSGEN'] == 'true' else '✅ Enabled'}\n"
-                        f"<b>Dirty:</b> {'✅ Yes' if config['DIRTY_BUILD'] == 'true' else '❌ No'}\n"
-                        f"<b>Clean:</b> {'✅ Yes' if config['CLEAN_BUILD'] == 'true' else '❌ No'}\n"
-                        f"<b>Requester:</b> <a href='{requester_link}'>{config['REQUESTER']}</a>",
+                        f"<b>Requester:</b> <a href='{requester_link}'>{config['REQUESTER']}</a>"
+                        f"{link_text}",
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True
                     )
                 else:
-                    await query.message.reply_text(f"❌ Failed to trigger. Code: {res.status_code}\n{res.text}")
+                    await query.edit_message_text(f"❌ Failed to trigger. Code: {res.status_code}\n{res.text}")
             except Exception as e:
-                await query.message.reply_text(f"Error: {e}")
+                await query.edit_message_text(f"Error: {e}")
             
             # Cleanup
             del context.user_data['build_config']
