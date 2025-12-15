@@ -239,12 +239,23 @@ def get_requester(user_id, users_db):
 
 # === BUILD MENU HELPERS ===
 def get_build_config_text(config):
+    # Mapping Display
+    g_map = {
+        "true": "Full",
+        "false": "Vanilla",
+        "core": "Core",
+        "basic": "Basic",
+        "default": "Default"
+    }
+    gapps_display = g_map.get(config['GAPPS_VARIANT'], config['GAPPS_VARIANT'])
+
     return (
         f"🛠 <b>Build Configuration</b>\n"
         f"<b>Device:</b> <code>{config['DEVICE']}</code>\n"
         f"<b>Manifest:</b> <a href='{config['LOCAL_MANIFEST_URL']}'>Link</a>\n"
         f"<b>Type:</b> <code>{config['BUILD_TYPE']}</code>\n"
         f"<b>Variant:</b> <code>{config['BUILD_VARIANT']}</code>\n"
+        f"<b>GApps:</b> <code>{gapps_display}</code>\n"
         f"<b>FSGen:</b> {'❌ Disabled' if config['DISABLE_FSGEN'] == 'true' else '✅ Enabled'}\n"
         f"<b>Dirty:</b> {'✅ Yes' if config['DIRTY_BUILD'] == 'true' else '❌ No'}\n"
         f"<b>Clean:</b> {'✅ Yes' if config['CLEAN_BUILD'] == 'true' else '❌ No'}"
@@ -262,17 +273,24 @@ def get_build_keyboard(config, is_admin, user_id):
     def cb(action):
         return f"bmenu_{action}:{user_id}"
 
+    # Label Logic
+    curr_g = config['GAPPS_VARIANT']
+    if curr_g == "true": gapps_label = "Full"
+    elif curr_g == "false": gapps_label = "Vanilla"
+    elif curr_g == "default": gapps_label = "Tree Default"
+    else: gapps_label = curr_g.capitalize() # Core, Basic
+
     # Buttons
     row1 = [
         InlineKeyboardButton(f"{t_icon} Type: {config['BUILD_TYPE']}", callback_data=cb("type")),
         InlineKeyboardButton(f"{v_icon} Var: {config['BUILD_VARIANT']}", callback_data=cb("var"))
     ]
     row2 = [
-        InlineKeyboardButton(f"{fs_icon} FSGen: {'OFF' if config['DISABLE_FSGEN'] == 'true' else 'ON'}", callback_data=cb("fsg")),
-        InlineKeyboardButton(f"{d_icon} Dirty: {'ON' if config['DIRTY_BUILD'] == 'true' else 'OFF'}", callback_data=cb("dirty"))
+        InlineKeyboardButton(f"🧩 GApps: {gapps_label}", callback_data=cb("gapps")),
+        InlineKeyboardButton(f"{fs_icon} FSGen: {'OFF' if config['DISABLE_FSGEN'] == 'true' else 'ON'}", callback_data=cb("fsg"))
     ]
     
-    row3 = []
+    row3 = [InlineKeyboardButton(f"{d_icon} Dirty: {'ON' if config['DIRTY_BUILD'] == 'true' else 'OFF'}", callback_data=cb("dirty"))]
     if is_admin:
          row3.append(InlineKeyboardButton(f"{c_icon} Clean: {'ON' if config['CLEAN_BUILD'] == 'true' else 'OFF'}", callback_data=cb("clean")))
     else:
@@ -331,6 +349,7 @@ async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "LOCAL_MANIFEST_URL": manifest_url,
         "BUILD_TYPE": "userdebug",
         "BUILD_VARIANT": "Test",
+        "GAPPS_VARIANT": "default", # Default: Tree Default
         "CLEAN_BUILD": "false",
         "DIRTY_BUILD": "false",
         "DISABLE_FSGEN": "false",
@@ -1255,6 +1274,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             config['BUILD_VARIANT'] = "Release" if config['BUILD_VARIANT'] == "Test" else "Test"
             await query.answer(f"Variant set to {config['BUILD_VARIANT']}")
 
+        elif action == "gapps":
+            # Cycle: default -> false(Vanilla) -> core -> basic -> true(Full)
+            modes = ["default", "false", "core", "basic", "true"]
+            curr = config.get('GAPPS_VARIANT', "default")
+            try:
+                idx = modes.index(curr)
+                config['GAPPS_VARIANT'] = modes[(idx + 1) % len(modes)]
+            except ValueError:
+                config['GAPPS_VARIANT'] = "default"
+            
+            # Label Logic for Toast
+            curr_g = config['GAPPS_VARIANT']
+            if curr_g == "true": label = "Full"
+            elif curr_g == "false": label = "Vanilla"
+            elif curr_g == "default": label = "Tree Default"
+            else: label = curr_g.capitalize() # Core, Basic
+            
+            await query.answer(f"GApps set to {label}")
+
         elif action == "fsg":
             # Toggle 'DISABLE_FSGEN' (true <-> false)
             # Note: UI says "FSGen: ON" which means DISABLE=false
@@ -1298,6 +1336,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fsgen_status = "❌ Disabled" if config['DISABLE_FSGEN'] == "true" else "✅ Enabled"
                 dirty_status = "✅ Yes" if config['DIRTY_BUILD'] == "true" else "❌ No"
                 clean_status = "✅ Yes" if config['CLEAN_BUILD'] == "true" else "❌ No"
+                
+                # Mapping Display
+                g_map = {
+                    "true": "Full",
+                    "false": "Vanilla",
+                    "core": "Core",
+                    "basic": "Basic",
+                    "default": "Default"
+                }
+                gapps_display = g_map.get(config['GAPPS_VARIANT'], config['GAPPS_VARIANT'])
 
                 try:
                     # Try sending to specific Topic first
@@ -1308,6 +1356,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              f"*Device:* `{config['DEVICE']}`\n"
                              f"*Type:* `{config['BUILD_TYPE']}`\n"
                              f"*Variant:* `{config['BUILD_VARIANT']}`\n"
+                             f"*GApps:* `{gapps_display}`\n"
                              f"*FSGen:* `{fsgen_status}`\n"
                              f"*Dirty:* `{dirty_status}`\n"
                              f"*Clean:* `{clean_status}`\n"
@@ -1325,6 +1374,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              f"*Device:* `{config['DEVICE']}`\n"
                              f"*Type:* `{config['BUILD_TYPE']}`\n"
                              f"*Variant:* `{config['BUILD_VARIANT']}`\n"
+                             f"*GApps:* `{gapps_display}`\n"
                              f"*FSGen:* `{fsgen_status}`\n"
                              f"*Dirty:* `{dirty_status}`\n"
                              f"*Clean:* `{clean_status}`\n"
@@ -1347,17 +1397,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 2. Trigger GitHub Dispatch with TG_MSG_ID
             url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/dispatches"
             
-            # Inject TG_MSG_ID into payload
+            # Construct optimized payload (Limit 10 properties)
+            # Grouping Telegram Meta info
+            tg_meta = {
+                "id": user_id
+            }
             if msg_id:
-                config['TG_MSG_ID'] = msg_id
-                # Also pass Chat ID if needed, but secrets handle that mostly
+                tg_meta["msg_id"] = msg_id
             
-            # Pass Telegram User ID for tagging
-            config['TG_USER_ID'] = user_id
+            # Create a clean copy for payload to avoid modifying the session config directly
+            final_payload = config.copy()
+            final_payload['TG_META'] = tg_meta
+            
+            # Remove keys if they exist (though they shouldn't be in config yet)
+            final_payload.pop('TG_MSG_ID', None)
+            final_payload.pop('TG_USER_ID', None)
+            # Requestor is needed, others are needed. 
+            
+            # Current Count: 
+            # 1. DEVICE, 2. LOCAL_MANIFEST_URL, 3. BUILD_TYPE, 4. BUILD_VARIANT, 5. GAPPS_VARIANT
+            # 6. CLEAN_BUILD, 7. DIRTY_BUILD, 8. DISABLE_FSGEN, 9. REQUESTER, 10. TG_META
+            # Total: 10 (EXACT LIMIT)
             
             payload = {
                 "event_type": "Telegram-Builder",
-                "client_payload": config
+                "client_payload": final_payload
             }
             
             def trigger():
