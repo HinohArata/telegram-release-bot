@@ -428,6 +428,29 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_utc = now.strftime("%Y-%m-%d")
         usage_today = user_data.get(today_utc, 0)
         
+        # --- CHECK GITHUB PERMISSION ---
+        perm_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/collaborators/{requester}/permission"
+        
+        def get_perm():
+            return requests.get(perm_url, headers=get_gh_headers())
+            
+        perm_res = await asyncio.to_thread(get_perm)
+        is_admin_gh = False
+        
+        if perm_res.status_code == 200:
+            p_data = perm_res.json()
+            # GitHub returns 'admin' or 'write' or 'read'
+            if p_data.get("permission") == "admin":
+                is_admin_gh = True
+        
+        # Determine Limit info
+        if is_admin_gh:
+            usage_info = f"{usage_today} builds (Unlimited ♾️)"
+        else:
+            daily_limit = 5
+            remaining = max(0, daily_limit - usage_today)
+            usage_info = f"{usage_today} builds ({remaining} left)"
+
         # Calculate time until next 00:00 UTC
         tomorrow = now + timedelta(days=1)
         next_reset = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -439,7 +462,7 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 <b>Quota Statistics</b>\n"
             f"<b>User:</b> <code>{requester}</code>\n"
             f"<b>Date (UTC):</b> {today_utc}\n"
-            f"<b>Usage Today:</b> {usage_today} builds\n"
+            f"<b>Usage Today:</b> {usage_info}\n"
             f"<b>Reset In:</b> {hours}h {minutes}m"
         )
         
