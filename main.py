@@ -382,25 +382,44 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
+    # Define both endpoints
+    url_progress = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
+    url_queued = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=queued"
     
-    def fetch_status():
-        return requests.get(url, headers=get_gh_headers())
+    def fetch_all_status():
+        res_p = requests.get(url_progress, headers=get_gh_headers())
+        res_q = requests.get(url_queued, headers=get_gh_headers())
+        
+        data_p = res_p.json() if res_p.status_code == 200 else {}
+        data_q = res_q.json() if res_q.status_code == 200 else {}
+        
+        runs_p = data_p.get('workflow_runs', [])
+        runs_q = data_q.get('workflow_runs', [])
+        
+        # Combine lists
+        all_runs = runs_p + runs_q
+        return all_runs
 
     try:
-        res = await asyncio.to_thread(fetch_status)
-        data = res.json()
-        count = data.get('total_count', 0)
+        runs = await asyncio.to_thread(fetch_all_status)
+        count = len(runs)
         
         if count == 0:
-            await update.message.reply_text("✅ No active builds at the moment.")
+            await update.message.reply_text("✅ No active or queued builds.")
         else:
             redis_client: redis.Redis = context.bot_data["redis"]
-            msg = f"🔄 *Active Builds ({count}):*\n"
+            msg = f"🔄 *Active & Queued Builds ({count}):*\n"
             
-            for run in data.get('workflow_runs', []):
+            for run in runs:
                 actor = run['actor']['login']
+                status_raw = run['status'] # 'in_progress' or 'queued'
                 
+                # Format Status Icon
+                if status_raw == "queued":
+                    status_icon = "⏳ Queued"
+                else:
+                    status_icon = "⚙️ Running"
+
                 # Try to get linked Message ID
                 tg_link = ""
                 try:
@@ -428,7 +447,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-                msg += f"- `{run['name']}`\n  Trigger: `{actor}`\n  ID: `{run['id']}`\n  [View Log]({run['html_url']}){tg_link}\n\n"
+                msg += f"- `{run['name']}` ({status_icon})\n  Trigger: `{actor}`\n  ID: `{run['id']}`\n  [View Log]({run['html_url']}){tg_link}\n\n"
             
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     except Exception as e:
@@ -520,15 +539,24 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Check active builds
-    status_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
+    # Check active & queued builds
+    url_progress = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=in_progress"
+    url_queued = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs?status=queued"
     
-    try:
-        res = await asyncio.to_thread(requests.get, status_url, headers=get_gh_headers())
-        data = res.json()
+    def fetch_cancellable():
+        res_p = requests.get(url_progress, headers=get_gh_headers())
+        res_q = requests.get(url_queued, headers=get_gh_headers())
         
-        if data.get('total_count', 0) == 0:
-            await update.message.reply_text("No active builds to cancel.")
+        runs_p = res_p.json().get('workflow_runs', []) if res_p.status_code == 200 else []
+        runs_q = res_q.json().get('workflow_runs', []) if res_q.status_code == 200 else []
+        
+        return runs_p + runs_q
+
+    try:
+        all_runs = await asyncio.to_thread(fetch_cancellable)
+        
+        if not all_runs:
+            await update.message.reply_text("No active or queued builds to cancel.")
             return
 
         args = context.args
@@ -536,10 +564,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if len(args) > 0:
             target_id = args[0]
-        elif data['total_count'] == 1:
-            target_id = data['workflow_runs'][0]['id']
+        elif len(all_runs) == 1:
+            target_id = all_runs[0]['id']
         else:
-            await update.message.reply_text("⚠️ Multiple builds active. Use `/cancel <run_id>`.\nCheck IDs with `/status`.")
+            await update.message.reply_text("⚠️ Multiple builds found. Use `/cancel <run_id>`.\nCheck IDs with `/status`.")
             return
 
         cancel_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/actions/runs/{target_id}/cancel"
