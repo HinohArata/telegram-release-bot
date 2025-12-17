@@ -6,6 +6,10 @@ import json
 from datetime import datetime, timedelta, timezone
 import re
 import redis
+import ssl
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
+from urllib3.util.ssl_ import create_urllib3_context
 from functools import partial
 import base64
 
@@ -94,6 +98,46 @@ async def run_redis_command(redis_client, command_name, *args, **kwargs):
         print(f"[ERROR] Redis command '{command_name}' failed: {e}")
         return None
 
+# === SSL ADAPTER ===
+class TLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False):
+        ctx = create_urllib3_context()
+        
+        # FIX 1: Gunakan cara modern untuk set versi TLS (Menghilangkan DeprecationWarning)
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        except AttributeError:
+            # Fallback untuk Python versi lama
+            ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
+        
+        # FIX 2: Atur Cipher ke SECLEVEL=1. 
+        # Ini mengatasi 'TLSV1_ALERT_INTERNAL_ERROR' (_ssl.c:1032) saat koneksi ke Cloudflare/Nginx ketat.
+        try:
+            ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+        except Exception:
+            pass
+
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            ssl_context=ctx
+        )
+
+def get_session():
+    session = requests.Session()
+    adapter = TLSAdapter()
+    session.mount('https://', adapter)
+    
+    # FIX 3: Bypass Cloudflare Bot Protection
+    # Cloudflare sering memutus koneksi SSL jika User-Agent adalah 'python-requests'
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://jenkins.afterlifeos.com/"
+    })
+    return session
+
 # === JENKINS HELPERS ===
 def get_jenkins_auth():
     return (JENKINS_USER, JENKINS_TOKEN)
@@ -102,7 +146,8 @@ def trigger_jenkins_build(params):
     # Jenkins API: buildWithParameters
     url = f"{JENKINS_URL}/job/{JENKINS_JOB}/buildWithParameters"
     try:
-        res = requests.post(url, auth=get_jenkins_auth(), params=params, timeout=10)
+        session = get_session()
+        res = session.post(url, auth=get_jenkins_auth(), params=params, timeout=10)
         return res.status_code
     except Exception as e:
         print(f"Jenkins Trigger Error: {e}")
@@ -111,7 +156,8 @@ def trigger_jenkins_build(params):
 def get_jenkins_queue_item(queue_id):
     url = f"{JENKINS_URL}/queue/item/{queue_id}/api/json"
     try:
-        res = requests.get(url, auth=get_jenkins_auth(), timeout=5)
+        session = get_session()
+        res = session.get(url, auth=get_jenkins_auth(), timeout=5)
         if res.status_code == 200:
             return res.json()
     except:
@@ -332,10 +378,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Fetch from Jenkins API
     # tree=builds[number,status,result,timestamp,building,actions[parameters[name,value]]],queueItem[...]
-    url = f"{JENKINS_URL}/job/{JENKINS_JOB}/api/json?tree=builds[number,result,timestamp,building,actions[parameters[name,value]]],queue[items[id,why,task[name]]&quot;"
+    url = f"{JENKINS_URL}/job/{JENKINS_JOB}/api/json?tree=builds[number,result,timestamp,building,actions[parameters[name,value]]],queue[items[id,why,task[name]]]"
     
+    def fetch_status():
+        session = get_session()
+        return session.get(url, auth=get_jenkins_auth())
+
     try:
-        res = await asyncio.to_thread(requests.get, url, auth=get_jenkins_auth())
+        res = await asyncio.to_thread(fetch_status)
         if res.status_code != 200:
             await update.message.reply_text(f"⚠️ Failed to fetch Jenkins status. Code: {res.status_code}\n{res.text[:200]}")
             return
@@ -392,27 +442,117 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not JENKINS_URL: return
-    # Requires Admin or Requester check. Implementing Admin or basic check.
-    # For simplicity: /cancel <build_number>
     
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: `/cancel <build_number>`")
-        return
+    user_id = update.effective_user.id
+    arg_id = context.args[0] if context.args else None
     
-    build_num = args[0]
-    
-    url = f"{JENKINS_URL}/job/{JENKINS_JOB}/{build_num}/stop"
+    # Helper to stop build
+    def stop_build(b_num):
+        url = f"{JENKINS_URL}/job/{JENKINS_JOB}/{b_num}/stop"
+        s = get_session()
+        return s.post(url, auth=get_jenkins_auth())
+
+    # Helper to cancel queue
+    def cancel_queue(q_id):
+        url = f"{JENKINS_URL}/queue/cancelItem?id={q_id}"
+        s = get_session()
+        return s.post(url, auth=get_jenkins_auth())
+
+    # Helper to find target if no ID provided
+    def find_target():
+        s = get_session()
+        # Get Builds
+        b_url = f"{JENKINS_URL}/job/{JENKINS_JOB}/api/json?tree=builds[number,building,actions[parameters[name,value]]]"
+        b_res = s.get(b_url, auth=get_jenkins_auth())
+        
+        # Get Queue
+        q_url = f"{JENKINS_URL}/queue/api/json?tree=items[id,task[name],actions[parameters[name,value]]]"
+        q_res = s.get(q_url, auth=get_jenkins_auth())
+        
+        targets = []
+        
+        # Check Builds
+        if b_res.status_code == 200:
+            for b in b_res.json().get('builds', []):
+                if b.get('building'):
+                    # Check ownership
+                    is_owner = False
+                    for a in b.get('actions', []):
+                        for p in a.get('parameters', []):
+                            if p['name'] == 'TG_USER_ID' and str(p['value']) == str(user_id):
+                                is_owner = True
+                    if is_owner:
+                        targets.append(('build', b['number']))
+
+        # Check Queue
+        if q_res.status_code == 200:
+            for q in q_res.json().get('items', []):
+                if q.get('task', {}).get('name') == JENKINS_JOB:
+                    is_owner = False
+                    for a in q.get('actions', []):
+                        for p in a.get('parameters', []):
+                             if p['name'] == 'TG_USER_ID' and str(p['value']) == str(user_id):
+                                is_owner = True
+                    if is_owner:
+                        targets.append(('queue', q['id']))
+        
+        return targets
+
+    # --- EXECUTION LOGIC ---
+    target_type = None
+    target_val = None
+
+    if arg_id:
+        # User provided ID. We don't know if it's build or queue.
+        # Try Build first (most common)
+        target_val = arg_id
+        # We'll try generic stop logic below
+    else:
+        # Auto-detect
+        targets = await asyncio.to_thread(find_target)
+        if len(targets) == 0:
+            await update.message.reply_text("✅ No active builds found for you.")
+            return
+        elif len(targets) > 1:
+            msg = "⚠️ <b>Multiple builds found. Please specify ID:</b>\n"
+            for t_type, t_id in targets:
+                msg += f"- <code>/cancel {t_id}</code> ({t_type.capitalize()})\n"
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            return
+        else:
+            # Found exactly 1
+            target_type, target_val = targets[0]
+
+    # Perform Cancellation
+    msg = await update.message.reply_text(f"⏳ Stopping #{target_val}...")
     
     try:
-        # Jenkins stop requires POST
-        res = await asyncio.to_thread(requests.post, url, auth=get_jenkins_auth())
-        if res.status_code in [200, 302]: # 302 redirect means success in Jenkins often
-            await update.message.reply_text(f"🛑 Build #{build_num} stopped.")
-        else:
-            await update.message.reply_text(f"❌ Failed to stop. Code: {res.status_code}")
+        if target_type == 'queue':
+            res = await asyncio.to_thread(cancel_queue, target_val)
+            if res.status_code in [200, 302, 204]:
+                await msg.edit_text(f"🛑 Queue Item #{target_val} cancelled.")
+                return
+        elif target_type == 'build':
+            res = await asyncio.to_thread(stop_build, target_val)
+            if res.status_code in [200, 302]:
+                await msg.edit_text(f"🛑 Build #{target_val} stopped.")
+                return
+        
+        # If we didn't know the type (manual ID input), Try Build First, then Queue
+        if not target_type:
+            res_b = await asyncio.to_thread(stop_build, target_val)
+            if res_b.status_code in [200, 302]:
+                await msg.edit_text(f"🛑 Build #{target_val} stopped.")
+            else:
+                # Try Queue
+                res_q = await asyncio.to_thread(cancel_queue, target_val)
+                if res_q.status_code in [200, 302, 204]:
+                    await msg.edit_text(f"🛑 Queue Item #{target_val} cancelled.")
+                else:
+                    await msg.edit_text(f"❌ Failed to find/stop ID #{target_val}.")
+                    
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await msg.edit_text(f"Error: {e}")
 
 async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Reuse existing logic calling GitHub Raw, as Jenkins updates the same file
